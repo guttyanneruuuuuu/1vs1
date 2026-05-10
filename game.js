@@ -1,10 +1,8 @@
 /* =========================================================
-   土俵バトル - 1vs1 ジャイロ相撲 (大幅リニューアル版 v2)
-   - PeerJS で合言葉マッチング (host/guest 決定はID辞書順)
-   - WebRTC DataChannel で 入力同期 (authoritative host)
-   - ジャイロ操作 + 複数アクションボタン
-   - スペシャルアクション、コンボシステム、画面エフェクト
-   - 強化版: キャラクターデザイン、高度なエフェクト、ジャイロ感度改善
+   土俵バトル - 1vs1 ジャイロ相撲 (極限強化版 v3)
+   - CPU AI 改善: 場外回避、より賢い立ち回り
+   - デザイン極限強化: 表情、砂埃、背景、和風ディテール
+   - ジャイロ・エフェクト・ゲーム性の更なるブラッシュアップ
    ========================================================= */
 
 (() => {
@@ -29,6 +27,7 @@ const ARENA = {
   size: 1000,
   ringRadius: 420,
   ringInnerRadius: 405,
+  dangerZone: 320, // CPUが警戒し始める距離
 };
 const PLAYER = {
   radius: 56,
@@ -101,11 +100,11 @@ const state = {
   screenShakeTime: 0,
   comboCount: 0,
   comboResetTimer: 0,
-  // 新規: 高度なエフェクト管理
   impactFlash: 0,
   impactFlashMax: 0.15,
   shockwaves: [],
   trailParticles: [],
+  dustParticles: [],
 };
 
 // ---------- PeerJS matchmaking ----------
@@ -280,11 +279,9 @@ function attachOrientation(){
     const dg = g - state.motionCalibration.gamma;
     const db = b - state.motionCalibration.beta;
     
-    // 改善版: より精密なジャイロ処理
     let tx = softZone(dg, GYRO.deadZone, GYRO.fullZone);
     let ty = softZone(db, GYRO.deadZone, GYRO.fullZone);
     
-    // 加速度による感度調整
     const tiltMagnitude = Math.hypot(tx, ty);
     if(tiltMagnitude > 0.3){
       const factor = 1 + (tiltMagnitude - 0.3) * GYRO.accelerationFactor * 0.5;
@@ -295,7 +292,6 @@ function attachOrientation(){
     tx = clamp(tx, -GYRO.maxTilt, GYRO.maxTilt);
     ty = clamp(ty, -GYRO.maxTilt, GYRO.maxTilt);
     
-    // スムージング
     state.motionTilt.x = state.motionTilt.x * GYRO.smoothing + tx * (1 - GYRO.smoothing);
     state.motionTilt.y = state.motionTilt.y * GYRO.smoothing + ty * (1 - GYRO.smoothing);
   }, true);
@@ -483,33 +479,47 @@ function endMatchAbort(){
   showScreen('lobby');
 }
 
+// ---------- CPU AI 改善 ----------
 function cpuThink(dt){
-  const me = state.game.p1;
-  const op = state.game.p2;
-  const dx = op.x - me.x;
-  const dy = op.y - me.y;
-  const dist = Math.hypot(dx, dy);
-  const mag = dist > 0.1 ? 1 : 0;
+  const me = state.game.p2; // CPUは常にp2
+  const op = state.game.p1;
+  const cx = ARENA.size/2, cy = ARENA.size/2;
   
-  state.opInput.tx = (mag > 0) ? dx / dist * 0.7 : 0;
-  state.opInput.ty = (mag > 0) ? dy / dist * 0.7 : 0;
+  // 土俵中央へのベクトル
+  const dxCenter = cx - me.x;
+  const dyCenter = cy - me.y;
+  const distCenter = Math.hypot(dxCenter, dyCenter);
+  
+  // 相手へのベクトル
+  const dxOp = op.x - me.x;
+  const dyOp = op.y - me.y;
+  const distOp = Math.hypot(dxOp, dyOp);
+  
+  let targetX = dxOp, targetY = dyOp;
+  
+  // 場外回避ロジック: 土俵の端に近づいたら中央に戻ることを優先
+  if(distCenter > ARENA.dangerZone){
+    const pull = (distCenter - ARENA.dangerZone) / (ARENA.ringRadius - ARENA.dangerZone);
+    targetX = dxOp * (1 - pull) + dxCenter * pull;
+    targetY = dyOp * (1 - pull) + dyCenter * pull;
+    
+    // 緊急回避: 非常に端にいる場合はタックルで中央に戻る
+    if(distCenter > ARENA.ringRadius - 60 && me.stamina > PLAYER.tackleStaminaCost && me.cooldown <= 0){
+      state.opInput.tackle = true;
+    }
+  }
+  
+  const distTarget = Math.hypot(targetX, targetY);
+  state.opInput.tx = distTarget > 0.1 ? targetX / distTarget * 0.75 : 0;
+  state.opInput.ty = distTarget > 0.1 ? targetY / distTarget * 0.75 : 0;
   
   const difficulty = state.cpuDifficulty;
   const rand = Math.random();
   
-  if(difficulty === 'easy'){
-    if(dist < 200 && rand < 0.15) state.opInput.tackle = true;
-    if(dist < 150 && rand < 0.08) state.opInput.spin = true;
-    if(dist < 100 && rand < 0.1) state.opInput.defend = true;
-  } else if(difficulty === 'normal'){
-    if(dist < 250 && rand < 0.25) state.opInput.tackle = true;
-    if(dist < 180 && rand < 0.15) state.opInput.spin = true;
-    if(dist < 120 && rand < 0.2) state.opInput.defend = true;
-  } else {
-    if(dist < 280 && rand < 0.35) state.opInput.tackle = true;
-    if(dist < 200 && rand < 0.25) state.opInput.spin = true;
-    if(dist < 150 && rand < 0.3) state.opInput.defend = true;
-  }
+  // 攻撃ロジック
+  if(distOp < 250 && rand < 0.2) state.opInput.tackle = true;
+  if(distOp < 180 && rand < 0.12) state.opInput.spin = true;
+  if(distOp < 120 && rand < 0.15) state.opInput.defend = true;
 }
 
 function resetGameState(){
@@ -520,6 +530,7 @@ function resetGameState(){
   state.impactFlash = 0;
   state.shockwaves = [];
   state.trailParticles = [];
+  state.dustParticles = [];
 }
 
 function createInitialGameState(){
@@ -533,6 +544,7 @@ function createInitialGameState(){
       cooldown:0, spinCooldown:0, defendCooldown:0, 
       color:'red', alive:true,
       isDefending: false,
+      hitT: 0,
     },
     p2: { 
       x: ARENA.size*0.5 + 180, y: ARENA.size*0.5, 
@@ -543,6 +555,7 @@ function createInitialGameState(){
       cooldown:0, spinCooldown:0, defendCooldown:0, 
       color:'blue', alive:true,
       isDefending: false,
+      hitT: 0,
     },
     t: 0,
     paused: true,
@@ -659,17 +672,12 @@ function loop(){
     updateFx(dt);
   }
 
-  // Update screen shake
   state.screenShakeTime -= dt;
   if(state.screenShakeTime < 0) state.screenShakeTime = 0;
 
-  // Update combo timer
   state.comboResetTimer -= dt;
-  if(state.comboResetTimer < 0){
-    state.comboCount = 0;
-  }
+  if(state.comboResetTimer < 0) state.comboCount = 0;
 
-  // Update impact flash
   state.impactFlash -= dt;
   if(state.impactFlash < 0) state.impactFlash = 0;
 
@@ -679,10 +687,7 @@ function loop(){
 // ---------- Simulation ----------
 function simulate(dt){
   const g = state.game;
-  if(g.paused){
-    return;
-  }
-  if(g.roundEnded) return;
+  if(g.paused || g.roundEnded) return;
 
   applyInput(g.p1, state.myInput, dt);
   applyInput(g.p2, state.opInput, dt);
@@ -707,6 +712,8 @@ function simulate(dt){
   g.p2.spinCooldown = Math.max(0, g.p2.spinCooldown - dt);
   g.p1.defendCooldown = Math.max(0, g.p1.defendCooldown - dt);
   g.p2.defendCooldown = Math.max(0, g.p2.defendCooldown - dt);
+  g.p1.hitT = Math.max(0, g.p1.hitT - dt);
+  g.p2.hitT = Math.max(0, g.p2.hitT - dt);
 
   g.p1.isDefending = g.p1.defendT > 0;
   g.p2.isDefending = g.p2.defendT > 0;
@@ -718,13 +725,7 @@ function simulate(dt){
 
   if(out1 || out2){
     g.roundEnded = true;
-    let winner = null;
-    if(out1 && out2){
-      const d1 = dist(g.p1.x,g.p1.y,cx,cy);
-      const d2 = dist(g.p2.x,g.p2.y,cx,cy);
-      winner = (d1>d2) ? 'p2' : 'p1';
-    } else if(out1) winner = 'p2';
-    else winner = 'p1';
+    let winner = (out1 && out2) ? (dist(g.p1.x,g.p1.y,cx,cy) > dist(g.p2.x,g.p2.y,cx,cy) ? 'p2' : 'p1') : (out1 ? 'p2' : 'p1');
     g.winner = winner;
     onRoundEnd(winner);
   }
@@ -735,46 +736,29 @@ function simulate(dt){
 function applyInput(p, inp, dt){
   if(!p.alive) return;
 
-  // Spin attack
   if(inp.spin && p.spinCooldown<=0 && p.stamina>=PLAYER.spinStaminaCost){
     p.stamina -= PLAYER.spinStaminaCost;
     p.spinT = PLAYER.spinDuration;
     p.spinCooldown = PLAYER.spinCooldown;
     p.specialGauge = Math.min(PLAYER.specialGaugeMax, p.specialGauge + 20);
     const mag = Math.hypot(inp.tx, inp.ty);
-    let dx, dy;
-    if(mag > 0.05){ dx = inp.tx/mag; dy = inp.ty/mag; }
-    else {
-      const vmag = Math.hypot(p.vx,p.vy);
-      if(vmag>1){ dx = p.vx/vmag; dy = p.vy/vmag; }
-      else { dx = (p===state.game.p1?1:-1); dy = 0; }
-    }
-    p.vx += dx * 480;
-    p.vy += dy * 480;
+    let dx = mag > 0.05 ? inp.tx/mag : (p===state.game.p1?1:-1), dy = mag > 0.05 ? inp.ty/mag : 0;
+    p.vx += dx * 480; p.vy += dy * 480;
   }
 
-  // Defend
   if(inp.defend && p.defendCooldown<=0 && p.stamina>=PLAYER.defenseStaminaCost){
     p.stamina -= PLAYER.defenseStaminaCost;
     p.defendT = PLAYER.defenseDuration;
     p.defendCooldown = PLAYER.defenseCooldown;
   }
 
-  // Tackle
   if(inp.tackle && p.cooldown<=0 && p.stamina>=PLAYER.tackleStaminaCost){
     p.stamina -= PLAYER.tackleStaminaCost;
     p.tackleT = PLAYER.tackleDuration;
     p.cooldown = PLAYER.tackleCooldown;
     const mag = Math.hypot(inp.tx, inp.ty);
-    let dx, dy;
-    if(mag > 0.05){ dx = inp.tx/mag; dy = inp.ty/mag; }
-    else {
-      const vmag = Math.hypot(p.vx,p.vy);
-      if(vmag>1){ dx = p.vx/vmag; dy = p.vy/vmag; }
-      else { dx = (p===state.game.p1?1:-1); dy = 0; }
-    }
-    p.vx += dx * 420;
-    p.vy += dy * 420;
+    let dx = mag > 0.05 ? inp.tx/mag : (p===state.game.p1?1:-1), dy = mag > 0.05 ? inp.ty/mag : 0;
+    p.vx += dx * 420; p.vy += dy * 420;
   }
 
   const accel = (p.tackleT>0 || p.spinT>0) ? PLAYER.tackleAccel : PLAYER.accel;
@@ -784,6 +768,11 @@ function applyInput(p, inp, dt){
   const maxV = (p.tackleT>0 || p.spinT>0) ? PLAYER.maxSpeed*1.7 : PLAYER.maxSpeed;
   const sp = Math.hypot(p.vx,p.vy);
   if(sp>maxV){ p.vx*=maxV/sp; p.vy*=maxV/sp; }
+  
+  // 砂埃エフェクトの発生
+  if(sp > 200 && Math.random() < 0.3){
+    spawnDust(p.x, p.y + PLAYER.radius*0.8);
+  }
 }
 
 function integrate(p, dt){
@@ -806,21 +795,21 @@ function resolveCollision(a,b){
   const vn = rvx*nx + rvy*ny;
   if(vn > 0) return;
 
-  // Defense damage reduction
-  let damageMultiplier = 1.0;
-  if(a.isDefending) damageMultiplier *= 0.5;
-  if(b.isDefending) damageMultiplier *= 0.5;
+  let dmg = 1.0;
+  if(a.isDefending) dmg *= 0.5;
+  if(b.isDefending) dmg *= 0.5;
 
-  a.vx -= nx*vn*PLAYER.restitution*damageMultiplier;
-  a.vy -= ny*vn*PLAYER.restitution*damageMultiplier;
-  b.vx += nx*vn*PLAYER.restitution*damageMultiplier;
-  b.vy += ny*vn*PLAYER.restitution*damageMultiplier;
+  a.vx -= nx*vn*PLAYER.restitution*dmg;
+  a.vy -= ny*vn*PLAYER.restitution*dmg;
+  b.vx += nx*vn*PLAYER.restitution*dmg;
+  b.vy += ny*vn*PLAYER.restitution*dmg;
 
-  if(a.spinT>0){ b.vx += nx*280; b.vy += ny*280; }
-  if(b.spinT>0){ a.vx -= nx*280; a.vy -= ny*280; }
+  if(a.spinT>0){ b.vx += nx*280; b.vy += ny*280; b.hitT = 0.3; }
+  if(b.spinT>0){ a.vx -= nx*280; a.vy -= ny*280; a.hitT = 0.3; }
 
   const strength = Math.abs(vn);
   if(strength > 60){
+    a.hitT = 0.3; b.hitT = 0.3;
     navigator.vibrate && navigator.vibrate(20);
     playSfx('hit');
     spawnImpactFx((a.x+b.x)/2, (a.y+b.y)/2);
@@ -830,9 +819,7 @@ function resolveCollision(a,b){
     state.impactFlash = state.impactFlashMax;
     state.comboCount++;
     state.comboResetTimer = 1.0;
-    if(state.comboCount > 1){
-      playSfx('combo');
-    }
+    if(state.comboCount > 1) playSfx('combo');
     a.specialGauge = Math.min(PLAYER.specialGaugeMax, a.specialGauge + PLAYER.specialGaugePerHit);
     b.specialGauge = Math.min(PLAYER.specialGaugeMax, b.specialGauge + PLAYER.specialGaugePerHit);
   }
@@ -842,493 +829,195 @@ function resolveCollision(a,b){
 const fxParticles = [];
 function spawnImpactFx(x,y){
   for(let i=0;i<24;i++){
-    const a = Math.random()*Math.PI*2;
-    const sp = 100 + Math.random()*280;
-    fxParticles.push({
-      x, y,
-      vx: Math.cos(a)*sp, vy: Math.sin(a)*sp,
-      life: 0.5 + Math.random()*0.4,
-      max: 0.8,
-      size: 4 + Math.random()*7,
-      color: Math.random() > 0.5 ? 'rgba(255,200,100,{a})' : 'rgba(255,220,150,{a})',
-    });
+    const a = Math.random()*Math.PI*2, sp = 100 + Math.random()*280;
+    fxParticles.push({ x, y, vx: Math.cos(a)*sp, vy: Math.sin(a)*sp, life: 0.5 + Math.random()*0.4, max: 0.8, size: 4 + Math.random()*7, color: Math.random() > 0.5 ? 'rgba(255,200,100,{a})' : 'rgba(255,220,150,{a})' });
   }
 }
 
 function spawnShockwave(x, y, strength){
-  state.shockwaves.push({
-    x, y,
-    radius: 0,
-    maxRadius: 80 + strength * 0.3,
-    life: 0.3,
-    max: 0.3,
+  state.shockwaves.push({ x, y, radius: 0, maxRadius: 80 + strength * 0.3, life: 0.3, max: 0.3 });
+}
+
+function spawnDust(x, y){
+  state.dustParticles.push({
+    x: x + (Math.random()-0.5)*40,
+    y: y + (Math.random()-0.5)*20,
+    vx: (Math.random()-0.5)*30,
+    vy: -Math.random()*40,
+    life: 0.4 + Math.random()*0.3,
+    max: 0.7,
+    size: 5 + Math.random()*10
   });
 }
 
-function spawnTrailParticles(x, y, vx, vy){
-  for(let i=0;i<3;i++){
-    const angle = Math.atan2(vy, vx) + (Math.random() - 0.5) * 0.5;
-    const speed = Math.hypot(vx, vy) * 0.5;
-    state.trailParticles.push({
-      x, y,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed,
-      life: 0.2 + Math.random() * 0.1,
-      max: 0.3,
-      size: 3 + Math.random() * 3,
-    });
-  }
-}
-
 function updateFx(dt){
-  for(let i=fxParticles.length-1;i>=0;i--){
-    const p = fxParticles[i];
-    p.life -= dt;
-    if(p.life <= 0){ fxParticles.splice(i,1); continue; }
-    p.x += p.vx*dt; p.y += p.vy*dt;
-    p.vx *= 0.92; p.vy *= 0.92;
-  }
-
-  for(let i=state.shockwaves.length-1;i>=0;i--){
-    const s = state.shockwaves[i];
-    s.life -= dt;
-    if(s.life <= 0){ state.shockwaves.splice(i,1); continue; }
-    s.radius = s.maxRadius * (1 - s.life / s.max);
-  }
-
-  for(let i=state.trailParticles.length-1;i>=0;i--){
-    const p = state.trailParticles[i];
-    p.life -= dt;
-    if(p.life <= 0){ state.trailParticles.splice(i,1); continue; }
-    p.x += p.vx*dt; p.y += p.vy*dt;
-    p.vx *= 0.88; p.vy *= 0.88;
-  }
+  [fxParticles, state.shockwaves, state.trailParticles, state.dustParticles].forEach(arr => {
+    for(let i=arr.length-1;i>=0;i--){
+      const p = arr[i]; p.life -= dt;
+      if(p.life <= 0){ arr.splice(i,1); continue; }
+      if(p.vx !== undefined){ p.x += p.vx*dt; p.y += p.vy*dt; p.vx *= 0.92; p.vy *= 0.92; }
+      if(p.radius !== undefined) p.radius = p.maxRadius * (1 - p.life / p.max);
+    }
+  });
 }
 
 function drawFx(){
-  // Draw shockwaves
-  for(const s of state.shockwaves){
+  state.shockwaves.forEach(s => {
     const a = Math.max(0, s.life / s.max);
-    ctx.strokeStyle = `rgba(255,200,100,${a * 0.6})`;
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.arc(s.x, s.y, s.radius, 0, Math.PI*2);
-    ctx.stroke();
-  }
-
-  // Draw impact particles
-  for(const p of fxParticles){
+    ctx.strokeStyle = `rgba(255,200,100,${a * 0.6})`; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(s.x, s.y, s.radius, 0, Math.PI*2); ctx.stroke();
+  });
+  fxParticles.forEach(p => {
     const a = Math.max(0, p.life / p.max);
-    ctx.fillStyle = p.color.replace('{a}', a);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size*a, 0, Math.PI*2);
-    ctx.fill();
-  }
-
-  // Draw trail particles
-  for(const p of state.trailParticles){
+    ctx.fillStyle = p.color.replace('{a}', a); ctx.beginPath(); ctx.arc(p.x, p.y, p.size*a, 0, Math.PI*2); ctx.fill();
+  });
+  state.dustParticles.forEach(p => {
     const a = Math.max(0, p.life / p.max);
-    ctx.fillStyle = `rgba(200,220,255,${a * 0.5})`;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size*a, 0, Math.PI*2);
-    ctx.fill();
-  }
+    ctx.fillStyle = `rgba(180,150,100,${a * 0.4})`; ctx.beginPath(); ctx.arc(p.x, p.y, p.size*a, 0, Math.PI*2); ctx.fill();
+  });
 }
 
-function dist(x1,y1,x2,y2){ const dx=x2-x1, dy=y2-y1; return Math.hypot(dx,dy); }
+function dist(x1,y1,x2,y2){ return Math.hypot(x2-x1, y2-y1); }
 
 // ---------- Round end ----------
 function onRoundEnd(winner){
   let myWin = (winner === 'p1');
-  if(state.mode === 'cpu'){
-  }
   if(myWin) state.scoreMe++; else state.scoreOp++;
   const matchOver = (state.scoreMe>=ROUND.winsToMatch || state.scoreOp>=ROUND.winsToMatch);
-  if(state.mode === 'host'){
-    safeSend({
-      t:'round',
-      hostScore: state.scoreMe,
-      guestScore: state.scoreOp,
-      round: state.round + (matchOver?0:1),
-      banner: (winner==='p1') ? 'host' : (winner==='p2')?'guest':'draw',
-      matchOver
-    });
-  }
+  if(state.mode === 'host') safeSend({ t:'round', hostScore: state.scoreMe, guestScore: state.scoreOp, round: state.round + (matchOver?0:1), banner: (winner==='p1') ? 'host' : (winner==='p2')?'guest':'draw', matchOver });
   updateScoreUI();
   showRoundBannerWithSub(myWin? '勝ち！' : '負け…', `${state.scoreMe} － ${state.scoreOp}`, myWin?'red':'blue');
-  if(matchOver){
-    setTimeout(()=> showResult(myWin), 1500);
-  } else {
-    setTimeout(()=> {
-      state.round++;
-      state.game = createInitialGameState();
-      resetGameState();
-      startCountdownThenRun();
-    }, 1700);
-  }
+  if(matchOver) setTimeout(()=> showResult(myWin), 1500);
+  else setTimeout(()=> { state.round++; state.game = createInitialGameState(); resetGameState(); startCountdownThenRun(); }, 1700);
 }
 
 // ---------- Snapshot for guest ----------
 let lastSnapAt = 0;
 function sendSnapshot(){
-  const now = performance.now();
-  if (now - lastSnapAt < 33) return;
-  lastSnapAt = now;
+  const now = performance.now(); if (now - lastSnapAt < 33) return; lastSnapAt = now;
   if(!state.conn || !state.conn.open) return;
   const g = state.game;
-  const snap = {
-    p1: pack(g.p1),
-    p2: pack(g.p2),
-    paused: g.paused,
-    roundEnded: g.roundEnded,
-    score: [state.scoreMe, state.scoreOp],
-    round: state.round,
-  };
-  safeSend({ t:'snap', s: snap });
+  safeSend({ t:'snap', s: { p1: pack(g.p1), p2: pack(g.p2), paused: g.paused, roundEnded: g.roundEnded, score: [state.scoreMe, state.scoreOp], round: state.round } });
 }
-function pack(p){
-  return [Math.round(p.x), Math.round(p.y), Math.round(p.vx), Math.round(p.vy), Math.round(p.stamina), Math.round(p.specialGauge), Math.round(p.tackleT*1000), Math.round(p.spinT*1000), Math.round(p.defendT*1000), Math.round(p.cooldown*1000), p.isDefending?1:0];
-}
-function unpack(arr){
-  return { x:arr[0], y:arr[1], vx:arr[2], vy:arr[3], stamina:arr[4], specialGauge:arr[5], tackleT:arr[6]/1000, spinT:arr[7]/1000, defendT:arr[8]/1000, cooldown:arr[9]/1000, isDefending:arr[10]?true:false, alive:true, color: null };
-}
+function pack(p){ return [Math.round(p.x), Math.round(p.y), Math.round(p.vx), Math.round(p.vy), Math.round(p.stamina), Math.round(p.specialGauge), Math.round(p.tackleT*1000), Math.round(p.spinT*1000), Math.round(p.defendT*1000), Math.round(p.cooldown*1000), p.isDefending?1:0, Math.round(p.hitT*1000)]; }
+function unpack(arr){ return { x:arr[0], y:arr[1], vx:arr[2], vy:arr[3], stamina:arr[4], specialGauge:arr[5], tackleT:arr[6]/1000, spinT:arr[7]/1000, defendT:arr[8]/1000, cooldown:arr[9]/1000, isDefending:arr[10]?true:false, hitT:arr[11]/1000, alive:true, color: null }; }
 
 function interpFromSnapshot(){
   if(!state.remoteSnapshot) return;
   const s = state.remoteSnapshot;
-  const p1 = unpack(s.p1); p1.color = 'red';
-  const p2 = unpack(s.p2); p2.color = 'blue';
-  state.game.p1 = p1;
-  state.game.p2 = p2;
-  state.game.paused = !!s.paused;
-  state.game.roundEnded = !!s.roundEnded;
-  if(s.score){
-    state.scoreOp = s.score[0];
-    state.scoreMe = s.score[1];
-    updateScoreUI();
-  }
-  if(s.round){
-    if(state.round !== s.round){
-      state.round = s.round;
-      $('round-label').textContent = `第${state.round}番`;
-    }
-  }
+  state.game.p1 = unpack(s.p1); state.game.p1.color = 'red';
+  state.game.p2 = unpack(s.p2); state.game.p2.color = 'blue';
+  state.game.paused = !!s.paused; state.game.roundEnded = !!s.roundEnded;
+  if(s.score){ state.scoreOp = s.score[0]; state.scoreMe = s.score[1]; updateScoreUI(); }
+  if(s.round && state.round !== s.round){ state.round = s.round; $('round-label').textContent = `第${state.round}番`; }
 }
 
 // ---------- Render ----------
 function render(){
   const w = window.innerWidth, h = window.innerHeight;
   ctx.clearRect(0,0,w,h);
-
   ctx.save();
-  
-  // Screen shake effect
-  if(state.screenShakeTime > 0){
-    const shake = state.screenShakeIntensity;
-    const shakeX = (Math.random() - 0.5) * shake * 2;
-    const shakeY = (Math.random() - 0.5) * shake * 2;
-    ctx.translate(shakeX, shakeY);
-  }
-
-  // Impact flash effect
-  if(state.impactFlash > 0){
-    const flashAlpha = (state.impactFlash / state.impactFlashMax) * 0.3;
-    ctx.fillStyle = `rgba(255,255,255,${flashAlpha})`;
-    ctx.fillRect(0, 0, w, h);
-  }
-
-  ctx.translate(offsetX, offsetY);
-  ctx.scale(scale, scale);
-
-  if(state.mode === 'guest'){
-    ctx.translate(ARENA.size, ARENA.size);
-    ctx.rotate(Math.PI);
-  }
+  if(state.screenShakeTime > 0){ const s = state.screenShakeIntensity; ctx.translate((Math.random()-0.5)*s*2, (Math.random()-0.5)*s*2); }
+  if(state.impactFlash > 0){ ctx.fillStyle = `rgba(255,255,255,${(state.impactFlash/state.impactFlashMax)*0.3})`; ctx.fillRect(0,0,w,h); }
+  ctx.translate(offsetX, offsetY); ctx.scale(scale, scale);
+  if(state.mode === 'guest'){ ctx.translate(ARENA.size, ARENA.size); ctx.rotate(Math.PI); }
 
   drawDohyo();
-
-  let me, op;
-  if(state.mode === 'guest'){
-    me = state.game.p2; op = state.game.p1;
-  } else {
-    me = state.game.p1; op = state.game.p2;
-  }
-
-  drawShadow(me); drawShadow(op);
+  let me = state.mode === 'guest' ? state.game.p2 : state.game.p1;
+  let op = state.mode === 'guest' ? state.game.p1 : state.game.p2;
+  [me, op].forEach(drawShadow);
   drawRikishi(op, op === state.game.p1 ? '#a8322c' : '#2f4a6b', false);
   drawRikishi(me, me === state.game.p1 ? '#a8322c' : '#2f4a6b', true);
   drawFx();
-
   ctx.restore();
 
-  // UI
-  const myStamina = me.stamina;
-  const mySpecial = me.specialGauge;
-  $('stamina-fill').style.width = (myStamina/PLAYER.staminaMax*100)+'%';
-  const specialEl = $('special-fill');
-  if(specialEl){
-    specialEl.style.width = (mySpecial/PLAYER.specialGaugeMax*100)+'%';
-  }
+  $('stamina-fill').style.width = (me.stamina/PLAYER.staminaMax*100)+'%';
+  const sp = $('special-fill'); if(sp) sp.style.width = (me.specialGauge/PLAYER.specialGaugeMax*100)+'%';
+  $('btn-tackle').classList.toggle('cooldown', me.stamina < PLAYER.tackleStaminaCost || me.cooldown>0);
+  $('btn-spin').classList.toggle('cooldown', me.stamina < PLAYER.spinStaminaCost || me.spinCooldown>0);
+  $('btn-defend').classList.toggle('cooldown', me.stamina < PLAYER.defenseStaminaCost || me.defendCooldown>0);
 
-  const btnTackle = $('btn-tackle');
-  if(btnTackle){
-    btnTackle.classList.toggle('cooldown', myStamina < PLAYER.tackleStaminaCost || me.cooldown>0);
-  }
-  const btnSpin = $('btn-spin');
-  if(btnSpin){
-    btnSpin.classList.toggle('cooldown', myStamina < PLAYER.spinStaminaCost || me.spinCooldown>0);
-  }
-  const btnDefend = $('btn-defend');
-  if(btnDefend){
-    btnDefend.classList.toggle('cooldown', myStamina < PLAYER.defenseStaminaCost || me.defendCooldown>0);
-  }
-
-  // Combo display - enhanced
   if(state.comboCount > 1){
-    ctx.save();
-    ctx.translate(offsetX + window.innerWidth/2, offsetY + 120);
-    ctx.scale(1/scale, 1/scale);
-    const comboScale = 1 + Math.sin(performance.now() / 150) * 0.1;
-    ctx.scale(comboScale, comboScale);
-    ctx.fillStyle = 'rgba(255,200,0,0.9)';
-    ctx.font = 'bold 60px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.shadowColor = 'rgba(0,0,0,0.5)';
-    ctx.shadowBlur = 10;
-    ctx.shadowOffsetX = 2;
-    ctx.shadowOffsetY = 2;
-    ctx.fillText(`COMBO x${state.comboCount}`, 0, 0);
-    ctx.restore();
-  }
-
-  if(state.game.paused){
-    drawCountdown(w,h);
+    ctx.save(); ctx.translate(offsetX + w/2, offsetY + 120); ctx.scale(1/scale, 1/scale);
+    const s = 1 + Math.sin(performance.now()/150)*0.1; ctx.scale(s,s);
+    ctx.fillStyle = 'rgba(255,200,0,0.9)'; ctx.font = 'bold 60px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 10; ctx.fillText(`COMBO x${state.comboCount}`, 0, 0); ctx.restore();
   }
 }
 
 function drawDohyo(){
   const cx = ARENA.size/2, cy = ARENA.size/2;
-  
-  // 土俵の背景
-  ctx.fillStyle = '#cdb070';
-  ctx.fillRect(40,40,ARENA.size-80, ARENA.size-80);
-  
-  // 土俵の枠
-  ctx.strokeStyle = '#6b4a22';
-  ctx.lineWidth = 6;
-  ctx.strokeRect(40,40,ARENA.size-80, ARENA.size-80);
-
-  // 円形の土俵
-  const grad = ctx.createRadialGradient(cx,cy-60,80, cx,cy, ARENA.ringRadius);
-  grad.addColorStop(0, '#e3b67a');
-  grad.addColorStop(0.5, '#d4a968');
-  grad.addColorStop(1, '#a76f3a');
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.arc(cx,cy, ARENA.ringRadius, 0, Math.PI*2);
-  ctx.fill();
-
-  // 土俵の外枠（白）
-  ctx.lineWidth = 18;
-  ctx.strokeStyle = '#f1e1bc';
-  ctx.beginPath();
-  ctx.arc(cx,cy, ARENA.ringRadius-10, 0, Math.PI*2);
-  ctx.stroke();
-  
-  // 土俵の外枠（黒）
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = '#7a5a30';
-  ctx.beginPath();
-  ctx.arc(cx,cy, ARENA.ringRadius-10, 0, Math.PI*2);
-  ctx.stroke();
-
-  // 中央ラインと装飾
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(cx-50, cy-2, 100, 4);
-  ctx.fillRect(cx-50, cy-50, 100, 4);
-  ctx.fillRect(cx-50, cy+46, 100, 4);
-  
-  // 土俵の質感を追加
-  ctx.strokeStyle = 'rgba(0,0,0,0.1)';
-  ctx.lineWidth = 1;
-  for(let i=0;i<8;i++){
-    const angle = (i / 8) * Math.PI * 2;
-    const x1 = cx + Math.cos(angle) * (ARENA.ringRadius - 20);
-    const y1 = cy + Math.sin(angle) * (ARENA.ringRadius - 20);
-    const x2 = cx + Math.cos(angle) * ARENA.ringRadius;
-    const y2 = cy + Math.sin(angle) * ARENA.ringRadius;
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.stroke();
-  }
+  // 土俵の床
+  ctx.fillStyle = '#cdb070'; ctx.fillRect(40,40,ARENA.size-80, ARENA.size-80);
+  // 土俵の円
+  const g = ctx.createRadialGradient(cx,cy-60,80, cx,cy, ARENA.ringRadius);
+  g.addColorStop(0, '#e3b67a'); g.addColorStop(0.5, '#d4a968'); g.addColorStop(1, '#a76f3a');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx,cy, ARENA.ringRadius, 0, Math.PI*2); ctx.fill();
+  // 俵
+  ctx.lineWidth = 18; ctx.strokeStyle = '#f1e1bc'; ctx.beginPath(); ctx.arc(cx,cy, ARENA.ringRadius-10, 0, Math.PI*2); ctx.stroke();
+  ctx.lineWidth = 2; ctx.strokeStyle = '#7a5a30'; ctx.beginPath(); ctx.arc(cx,cy, ARENA.ringRadius-10, 0, Math.PI*2); ctx.stroke();
+  // 仕切り線
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.fillRect(cx-60, cy-4, 120, 8); ctx.fillRect(cx-60, cy-60, 120, 8); ctx.fillRect(cx-60, cy+52, 120, 8);
 }
 
-function drawShadow(p){
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.beginPath();
-  ctx.ellipse(p.x+6, p.y+14, PLAYER.radius*0.95, PLAYER.radius*0.4, 0, 0, Math.PI*2);
-  ctx.fill();
-}
+function drawShadow(p){ ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(p.x+6, p.y+14, PLAYER.radius*0.95, PLAYER.radius*0.4, 0, 0, Math.PI*2); ctx.fill(); }
 
 function drawRikishi(p, color, isMe){
   const r = PLAYER.radius;
+  ctx.save();
+  ctx.translate(p.x, p.y);
   
-  // 体のグラデーション
-  const grad = ctx.createRadialGradient(p.x-r*0.3, p.y-r*0.3, r*0.1, p.x, p.y, r);
-  grad.addColorStop(0, lighten(color, 0.25));
-  grad.addColorStop(0.6, lighten(color, 0.1));
-  grad.addColorStop(1, color);
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.arc(p.x, p.y, r, 0, Math.PI*2);
-  ctx.fill();
-
-  // mawashi（褌）
-  ctx.fillStyle = isMe ? '#f5e6c4' : '#dcd0b0';
-  ctx.beginPath();
-  ctx.arc(p.x, p.y+6, r*0.7, 0, Math.PI, false);
-  ctx.fill();
+  // 体
+  const g = ctx.createRadialGradient(-r*0.3, -r*0.3, r*0.1, 0, 0, r);
+  g.addColorStop(0, lighten(color, 0.3)); g.addColorStop(1, color);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI*2); ctx.fill();
   
-  // mawashi の装飾
-  ctx.strokeStyle = 'rgba(0,0,0,0.2)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(p.x, p.y+6, r*0.7, 0, Math.PI, false);
-  ctx.stroke();
+  // まわし
+  ctx.fillStyle = isMe ? '#f5e6c4' : '#dcd0b0'; ctx.beginPath(); ctx.arc(0, 6, r*0.7, 0, Math.PI, false); ctx.fill();
+  
+  // 輪郭
+  ctx.lineWidth = 5; ctx.strokeStyle = '#2b2118'; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI*2); ctx.stroke();
 
-  // 体の輪郭
-  ctx.lineWidth = 5;
-  ctx.strokeStyle = '#2b2118';
-  ctx.beginPath();
-  ctx.arc(p.x, p.y, r, 0, Math.PI*2);
-  ctx.stroke();
-
-  // tackle aura - 強化版
-  if(p.tackleT>0){
-    const tackleAlpha = p.tackleT / PLAYER.tackleDuration;
-    ctx.strokeStyle = `rgba(255,240,180,${0.8 * tackleAlpha})`;
-    ctx.lineWidth = 6;
-    ctx.beginPath();
-    ctx.arc(p.x,p.y, r+10, 0, Math.PI*2);
-    ctx.stroke();
-    
-    ctx.strokeStyle = `rgba(255,255,200,${0.6 * tackleAlpha})`;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.arc(p.x,p.y, r+18, 0, Math.PI*2);
-    ctx.stroke();
-    
-    const dir = Math.atan2(p.vy, p.vx);
-    ctx.strokeStyle = `rgba(255,255,255,${0.8 * tackleAlpha})`;
-    ctx.lineWidth = 4;
-    for(let i=0;i<6;i++){
-      const a = dir + (i-2.5)*0.12;
-      const x1 = p.x - Math.cos(a)*r;
-      const y1 = p.y - Math.sin(a)*r;
-      const x2 = x1 - Math.cos(a)*40;
-      const y2 = y1 - Math.sin(a)*40;
-      ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
-    }
+  // 表情（目）
+  ctx.fillStyle = '#2b2118';
+  if(p.hitT > 0){
+    // ダメージ時の目（×）
+    ctx.lineWidth = 3; ctx.strokeStyle = '#2b2118';
+    ctx.beginPath(); ctx.moveTo(-15, -15); ctx.lineTo(-5, -5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-5, -15); ctx.lineTo(-15, -5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(5, -15); ctx.lineTo(15, -5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(15, -15); ctx.lineTo(5, -5); ctx.stroke();
+  } else {
+    // 通常時の目
+    ctx.beginPath(); ctx.arc(-12, -10, 5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(12, -10, 5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-13, -11, 2, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(11, -11, 2, 0, Math.PI*2); ctx.fill();
   }
 
-  // spin aura - 強化版
-  if(p.spinT>0){
-    const spinAlpha = p.spinT / PLAYER.spinDuration;
-    ctx.strokeStyle = `rgba(200,255,100,${0.7 * spinAlpha})`;
-    ctx.lineWidth = 7;
-    const rotation = (performance.now() / 150) % (Math.PI*2);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, r+14, rotation, rotation + Math.PI*0.8);
-    ctx.stroke();
-    
-    ctx.strokeStyle = `rgba(150,255,50,${0.4 * spinAlpha})`;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, r+22, rotation + Math.PI*0.3, rotation + Math.PI*1.1);
-    ctx.stroke();
-  }
+  // アクションエフェクト
+  if(p.tackleT>0){ ctx.strokeStyle = 'rgba(255,240,180,0.8)'; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(0,0, r+10, 0, Math.PI*2); ctx.stroke(); }
+  if(p.spinT>0){ ctx.strokeStyle = 'rgba(200,255,100,0.8)'; ctx.lineWidth = 8; const rot = (performance.now()/100)%(Math.PI*2); ctx.beginPath(); ctx.arc(0,0, r+14, rot, rot+Math.PI*0.8); ctx.stroke(); }
+  if(p.isDefending){ ctx.strokeStyle = 'rgba(100,150,255,0.7)'; ctx.lineWidth = 10; ctx.beginPath(); ctx.arc(0,0, r+18, 0, Math.PI*2); ctx.stroke(); }
 
-  // defense shield - 強化版
-  if(p.isDefending){
-    const defendAlpha = p.defendT / PLAYER.defenseDuration;
-    ctx.strokeStyle = `rgba(100,150,255,${0.6 * defendAlpha})`;
-    ctx.lineWidth = 10;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, r+18, 0, Math.PI*2);
-    ctx.stroke();
-    
-    ctx.strokeStyle = `rgba(150,200,255,${0.4 * defendAlpha})`;
-    ctx.lineWidth = 5;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, r+26, 0, Math.PI*2);
-    ctx.stroke();
-    
-    // シールドの装飾
-    for(let i=0;i<8;i++){
-      const angle = (i / 8) * Math.PI * 2;
-      const x = p.x + Math.cos(angle) * (r + 22);
-      const y = p.y + Math.sin(angle) * (r + 22);
-      ctx.fillStyle = `rgba(100,150,255,${0.5 * defendAlpha})`;
-      ctx.beginPath();
-      ctx.arc(x, y, 4, 0, Math.PI*2);
-      ctx.fill();
-    }
-  }
-
-  // marker
+  // マーカー
   if(isMe){
-    ctx.save();
-    if(state.mode === 'guest'){
-      ctx.translate(p.x, p.y-r-14);
-      ctx.rotate(Math.PI);
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 24px "Hiragino Mincho ProN", serif';
-      ctx.textAlign='center';
-      ctx.textBaseline='middle';
-      ctx.shadowColor = 'rgba(0,0,0,0.5)';
-      ctx.shadowBlur = 3;
-      ctx.fillText('己', 0, 0);
-    } else {
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 24px "Hiragino Mincho ProN", serif';
-      ctx.textAlign='center';
-      ctx.textBaseline='middle';
-      ctx.shadowColor = 'rgba(0,0,0,0.5)';
-      ctx.shadowBlur = 3;
-      ctx.fillText('己', p.x, p.y-r-14);
-    }
-    ctx.restore();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 24px "Hiragino Mincho ProN", serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 3;
+    if(state.mode === 'guest'){ ctx.rotate(Math.PI); ctx.fillText('己', 0, r+20); } else { ctx.fillText('己', 0, -r-20); }
   }
+  ctx.restore();
 }
 
 function lighten(hex, amt){
   const c = hex.replace('#','');
-  const r = parseInt(c.slice(0,2),16);
-  const g = parseInt(c.slice(2,4),16);
-  const b = parseInt(c.slice(4,6),16);
+  const r = parseInt(c.slice(0,2),16), g = parseInt(c.slice(2,4),16), b = parseInt(c.slice(4,6),16);
   const f = (v)=> Math.min(255, Math.round(v + (255-v)*amt));
   return `rgb(${f(r)},${f(g)},${f(b)})`;
 }
 
-function drawCountdown(w,h){
-}
+function showResult(win){ state.matchOver = true; state.game.paused = true; $('result-title').textContent = win ? '勝利！' : '敗北…'; $('result-sub').textContent = win ? 'あなたの勝ちです！' : '相手の勝ちです…'; showScreen('result'); }
 
-// ---------- Result ----------
-function showResult(win){
-  state.matchOver = true;
-  state.game.paused = true;
-  $('result-title').textContent = win ? '勝利！' : '敗北…';
-  $('result-sub').textContent = win ? 'あなたの勝ちです！' : '相手の勝ちです…';
-  showScreen('result');
-}
-
-// ---------- Init ----------
-document.addEventListener('DOMContentLoaded', () => {
-  setupCanvas();
-  attachUI();
-  showScreen('lobby');
-});
-
+document.addEventListener('DOMContentLoaded', () => { setupCanvas(); attachUI(); showScreen('lobby'); });
 })();
