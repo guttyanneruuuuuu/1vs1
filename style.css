@@ -1,221 +1,194 @@
-/* 和風土俵バトル - 極限強化版デザイン */
+/* 和風土俵バトル - モバイル最適化版デザイン */
 :root{
   --paper:#f3e7c9;
-  --paper-2:#e8d8b0;
   --ink:#2b2118;
   --ink-soft:#5a4a36;
   --wood:#8a5a32;
   --wood-dark:#5e3a1d;
-  --tatami:#c9b274;
   --red:#a8322c;
   --red-deep:#7a221d;
   --blue:#2f4a6b;
-  --blue-deep:#1c2f47;
   --gold:#b88a3a;
-  --green:#3d7a3d;
-  --shadow: rgba(40,28,16,.35);
-  --accent-yellow: #ffd700;
+  --shadow: rgba(40,28,16,.3);
 }
 
 *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
 html,body{
   margin:0; padding:0; height:100%;
-  font-family: "Hiragino Mincho ProN","Yu Mincho","YuMincho","MS PMincho",serif;
+  font-family: "Hiragino Mincho ProN","Yu Mincho",serif;
   color:var(--ink);
-  background: 
-    linear-gradient(rgba(0,0,0,0.1), rgba(0,0,0,0.1)),
-    url('https://www.transparenttextures.com/patterns/paper.png'),
-    var(--paper);
+  background: var(--paper);
   overflow:hidden;
-  user-select:none;
-  -webkit-user-select:none;
   touch-action: none;
-  overscroll-behavior:none;
+  -webkit-user-select:none;
+  user-select:none;
 }
 
 .screen{
   position:fixed; inset:0;
   display:none;
   align-items:center; justify-content:center;
-  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  z-index: 10;
 }
 .screen.active{ display:flex; }
 
-/* ---------- Paper card ---------- */
+/* ---------- Paper card (Lobby/Result) ---------- */
 .paper{
-  width: min(94vw, 500px);
-  background: 
-    url('https://www.transparenttextures.com/patterns/asfalt-dark.png'),
-    linear-gradient(180deg, #fbf2d9 0%, #f0e2bd 100%);
+  width: min(90vw, 460px);
+  background: #fbf2d9;
   border: 4px solid var(--wood-dark);
-  border-radius: 12px;
-  padding: 32px 28px;
-  box-shadow: 
-    0 25px 60px var(--shadow),
-    inset 0 0 100px rgba(120,80,40,.1);
-  position:relative;
-  max-height: 94vh;
+  border-radius: 8px;
+  padding: 24px;
+  box-shadow: 0 15px 40px var(--shadow);
+  max-height: 90vh;
   overflow-y: auto;
-}
-.paper::before{
-  content:"";
-  position:absolute; inset:10px;
-  border:1px solid rgba(120,80,40,.4);
-  border-radius:8px;
-  pointer-events:none;
+  position: relative;
 }
 .title{
-  font-size: 46px;
-  letter-spacing: .2em;
+  font-size: clamp(28px, 8vw, 42px);
   text-align:center;
-  margin: 10px 0;
-  color: var(--ink);
-  text-shadow: 3px 3px 0 rgba(255,255,255,0.5);
-  font-weight: 900;
-}
-.title .brush{
-  display:inline-block;
-  background: #a8322c;
-  color:#fbf2d9;
-  padding: 4px 16px;
-  margin: 0 6px;
-  border-radius: 4px;
-  transform: rotate(-3deg);
-  box-shadow: 4px 4px 0 var(--wood-dark);
-}
-.subtitle{
-  text-align:center;
-  margin-bottom: 20px;
-  color: var(--ink-soft);
-  font-size: 15px;
-  font-weight: 600;
-  border-bottom: 2px solid var(--wood);
-  padding-bottom: 10px;
-}
-.rules{
-  background: rgba(255,255,255,0.4);
-  border-left: 5px solid var(--red);
-  padding: 15px 20px;
-  margin: 20px 0;
-}
-.rules h3{
   margin: 0 0 10px;
-  font-size: 18px;
-  color: var(--red-deep);
-}
-.rules ul{ margin: 0; padding-left: 20px; }
-.rules li{ margin: 6px 0; line-height: 1.5; font-weight: 500; }
-
-.match-area{ display:flex; flex-direction:column; gap:15px; }
-input[type=text]{
-  width:100%;
-  font-family: inherit;
-  font-size: 20px;
-  padding: 15px;
-  border: 3px solid var(--wood);
-  background: #fff;
-  border-radius: 0;
-  box-shadow: inset 3px 3px 6px rgba(0,0,0,0.1);
-}
-.btn{
-  font-family: inherit;
-  font-size: 18px;
-  padding: 16px;
-  border: none;
-  cursor: pointer;
-  transition: all .1s ease;
   font-weight: 900;
   letter-spacing: 0.1em;
 }
-.btn.primary{
+.title .brush{
   background: var(--red);
   color: #fff;
-  box-shadow: 0 6px 0 var(--red-deep);
+  padding: 2px 12px;
+  border-radius: 4px;
+  display: inline-block;
+  transform: rotate(-2deg);
 }
-.btn.primary:active{ transform: translateY(4px); box-shadow: 0 2px 0 var(--red-deep); }
-.btn.ghost{
-  background: var(--wood-dark);
-  color: #fff;
-  margin-top: 5px;
+.subtitle{
+  text-align:center;
+  font-size: 14px;
+  color: var(--ink-soft);
+  margin-bottom: 20px;
 }
+.rules{
+  background: rgba(0,0,0,0.05);
+  padding: 15px;
+  margin-bottom: 20px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.rules h3{ margin: 0 0 8px; color: var(--red-deep); }
+.rules ul{ margin: 0; padding-left: 20px; }
 
-/* ---------- Game screen ---------- */
-#game{
-  background: 
-    radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0%, rgba(0,0,0,0.4) 100%),
-    url('https://www.transparenttextures.com/patterns/dark-wood.png'),
-    #8c6230;
+.match-area{ display:flex; flex-direction:column; gap:12px; }
+input[type=text]{
+  width:100%;
+  padding: 12px;
+  font-size: 16px;
+  border: 2px solid var(--wood);
+  border-radius: 4px;
 }
+.btn{
+  padding: 14px;
+  font-size: 16px;
+  font-weight: bold;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.btn.primary{ background: var(--red); color: #fff; box-shadow: 0 4px 0 var(--red-deep); }
+.btn.primary:active{ transform: translateY(2px); box-shadow: 0 2px 0 var(--red-deep); }
+.btn.ghost{ background: var(--wood-dark); color: #fff; }
+
+/* ---------- Game Screen ---------- */
+#game{ background: #8c6230; }
 #hud{
   position: fixed;
-  top: 20px; left:20px; right:20px;
-  display:flex; justify-content: space-between; align-items:center;
-  z-index:10; pointer-events:none;
+  top: max(15px, env(safe-area-inset-top));
+  left: 15px; right: 15px;
+  display: flex; justify-content: space-between; align-items: flex-start;
+  pointer-events: none;
+  z-index: 20;
 }
 .score{
-  background: rgba(0,0,0,0.7);
+  background: rgba(0,0,0,0.6);
   color: #fff;
-  padding: 10px 25px;
-  border-radius: 50px;
-  font-size: 24px;
-  font-weight: 900;
-  border: 2px solid var(--gold);
+  padding: 6px 15px;
+  border-radius: 20px;
+  font-size: 18px;
+  font-weight: bold;
+  border: 1px solid var(--gold);
 }
 .round{
   background: var(--red);
   color: #fff;
-  padding: 10px 20px;
-  font-weight: 900;
-  border: 2px solid #fff;
+  padding: 6px 12px;
+  font-size: 14px;
+  font-weight: bold;
 }
 
 #stamina-wrap, #special-wrap{
   position: fixed;
-  left: 20px;
-  width: 250px;
-  z-index:10;
+  left: 15px;
+  width: min(40vw, 200px);
+  z-index: 20;
+  pointer-events: none;
 }
-#stamina-wrap{ bottom: 150px; }
-#special-wrap{ bottom: 120px; }
+#stamina-wrap{ bottom: calc(140px + env(safe-area-inset-bottom)); }
+#special-wrap{ bottom: calc(115px + env(safe-area-inset-bottom)); }
 
-#stamina-bar, #special-bar{
-  height: 20px;
-  background: rgba(0,0,0,0.5);
-  border: 2px solid #fff;
-}
-#stamina-fill{ background: linear-gradient(90deg, #ffd700, #ff8c00); }
-#special-fill{ background: linear-gradient(90deg, #00ffff, #0088ff); }
+#stamina-bar, #special-bar{ height: 12px; background: rgba(0,0,0,0.4); border: 1px solid #fff; border-radius: 6px; overflow: hidden; }
+#stamina-fill{ height: 100%; background: linear-gradient(90deg, #ffd700, #ff8c00); transition: width 0.1s; }
+#special-fill{ height: 100%; background: linear-gradient(90deg, #00ffff, #0088ff); transition: width 0.1s; }
 
 .action-btn{
   position: fixed;
-  width: 90px; height: 90px;
+  width: clamp(70px, 18vw, 90px);
+  height: clamp(70px, 18vw, 90px);
   border-radius: 50%;
-  border: 5px solid #fff;
+  border: 4px solid #fff;
   color: #fff;
   font-weight: 900;
-  font-size: 20px;
-  z-index: 10;
-  box-shadow: 0 8px 15px rgba(0,0,0,0.3);
-  text-shadow: 2px 2px 0 rgba(0,0,0,0.5);
+  font-size: clamp(14px, 4vw, 18px);
+  z-index: 30;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 5px 15px rgba(0,0,0,0.3);
 }
-.tackle-btn{ right: 20px; bottom: 20px; background: var(--red); }
-.spin-btn{ right: 20px; bottom: 125px; background: var(--gold); }
-.defend-btn{ right: 125px; bottom: 20px; background: var(--blue); }
+.tackle-btn{ right: max(15px, env(safe-area-inset-right)); bottom: max(15px, env(safe-area-inset-bottom)); background: var(--red); }
+.spin-btn{ right: max(15px, env(safe-area-inset-right)); bottom: calc(max(15px, env(safe-area-inset-bottom)) + clamp(80px, 22vw, 110px)); background: var(--gold); }
+.defend-btn{ right: calc(max(15px, env(safe-area-inset-right)) + clamp(80px, 22vw, 110px)); bottom: max(15px, env(safe-area-inset-bottom)); background: var(--blue); }
 
 .action-btn.cooldown{ opacity: 0.4; filter: grayscale(1); }
 
+.banner{
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  z-index: 50; pointer-events: none;
+  background: rgba(0,0,0,0.3);
+}
+.banner.hidden{ display: none; }
 .banner .inner{
   background: #fff;
-  border: 8px double var(--wood-dark);
-  padding: 40px 60px;
-  font-size: 50px;
+  border: 4px solid var(--wood-dark);
+  padding: 20px 40px;
+  font-size: clamp(24px, 8vw, 40px);
   font-weight: 900;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
 }
+.banner .sub{ font-size: 16px; margin-top: 5px; opacity: 0.7; }
 
-@media (max-width: 480px){
-  .title{ font-size: 32px; }
-  .action-btn{ width: 80px; height: 80px; font-size: 16px; }
-  .defend-btn{ right: 110px; }
-  .spin-btn{ bottom: 110px; }
-  #stamina-wrap, #special-wrap{ width: 180px; }
+.motion-prompt{
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.8);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+}
+.motion-prompt.hidden{ display: none; }
+
+canvas{ display: block; width: 100%; height: 100%; }
+
+@media (orientation: landscape) {
+  #stamina-wrap, #special-wrap { left: auto; right: 15px; width: 150px; }
+  #stamina-wrap { bottom: calc(80px + env(safe-area-inset-bottom)); }
+  #special-wrap { bottom: calc(55px + env(safe-area-inset-bottom)); }
+  .spin-btn { right: calc(max(15px, env(safe-area-inset-right)) + 80px); bottom: max(15px, env(safe-area-inset-bottom)); }
+  .defend-btn { right: calc(max(15px, env(safe-area-inset-right)) + 160px); bottom: max(15px, env(safe-area-inset-bottom)); }
 }
