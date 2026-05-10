@@ -1,8 +1,9 @@
 /* =========================================================
-   土俵バトル - 1vs1 ジャイロ相撲
+   土俵バトル - 1vs1 ジャイロ相撲 (大幅リニューアル版)
    - PeerJS で合言葉マッチング (host/guest 決定はID辞書順)
    - WebRTC DataChannel で 入力同期 (authoritative host)
-   - ジャイロ操作 + 突進ボタン
+   - ジャイロ操作 + 複数アクションボタン
+   - スペシャルアクション、コンボシステム、画面エフェクト
    ========================================================= */
 
 (() => {
@@ -24,67 +25,75 @@ const setStatus = (msg, isError=false) => {
 
 // ---------- Game constants ----------
 const ARENA = {
-  // logical units (we render scaled to fit screen)
-  size: 1000,            // square logical canvas
-  ringRadius: 420,       // 土俵 radius
+  size: 1000,
+  ringRadius: 420,
   ringInnerRadius: 405,
 };
 const PLAYER = {
   radius: 56,
   mass: 1.0,
-  accel: 1600,           // px/s^2 (logical) - 強化
-  maxSpeed: 650,         // 強化
-  friction: 0.86,        // per-frame multiplicative
-  tackleAccel: 5500,     // 強化
-  tackleDuration: 0.28,  // sec
-  tackleCooldown: 1.1,   // sec
+  accel: 1600,
+  maxSpeed: 650,
+  friction: 0.86,
+  tackleAccel: 5500,
+  tackleDuration: 0.28,
+  tackleCooldown: 1.1,
   tackleStaminaCost: 35,
+  // スペシャルアクション
+  spinAccel: 6500,
+  spinDuration: 0.35,
+  spinStaminaCost: 50,
+  spinCooldown: 1.5,
+  defenseStaminaCost: 25,
+  defenseCooldown: 0.8,
+  defenseDuration: 0.4,
+  // ゲージ
   staminaMax: 100,
-  staminaRegen: 28,      // per sec
-  restitution: 1.15,    // 強化 - より強い反発
+  staminaRegen: 28,
+  specialGaugeMax: 100,
+  specialGaugePerHit: 15,
+  restitution: 1.15,
 };
 const ROUND = {
   winsToMatch: 2,
-  startCountdown: 3, // seconds
+  startCountdown: 3,
 };
 
 // ---------- State ----------
 const state = {
-  mode: null,           // 'host' | 'guest' | 'cpu'
+  mode: null,
   peer: null,
   conn: null,
   myPeerId: null,
   opPeerId: null,
   passphrase: null,
   myMotionEnabled: false,
-  motionTilt: { x:0, y:0 }, // -1..1
+  motionTilt: { x:0, y:0 },
   motionRaw: { gamma: 0, beta: 0 },
-  motionCalibration: { gamma: 0, beta: 30 }, // subtracted before normalize
+  motionCalibration: { gamma: 0, beta: 30 },
   hasReceivedMotion: false,
-  // Authoritative shared state
   game: null,
-  // Inputs received from opponent (latest)
-  opInput: { tx:0, ty:0, tackle:false, seq:0 },
-  myInput: { tx:0, ty:0, tackle:false, seq:0 },
+  opInput: { tx:0, ty:0, tackle:false, spin:false, defend:false, seq:0 },
+  myInput: { tx:0, ty:0, tackle:false, spin:false, defend:false, seq:0 },
   scoreMe: 0,
   scoreOp: 0,
   round: 1,
   matchOver: false,
   rafId: null,
   lastTime: 0,
-  // For non-host (guest) interpolation
   remoteSnapshot: null,
   prevSnapshot: null,
   snapshotTime: 0,
-  // CPU
   cpuTarget: { x:500, y:500 },
+  cpuDifficulty: 'normal', // 'easy', 'normal', 'hard'
+  // エフェクト
+  screenShakeIntensity: 0,
+  screenShakeTime: 0,
+  comboCount: 0,
+  comboResetTimer: 0,
 };
 
 // ---------- PeerJS matchmaking ----------
-// Passphrase => deterministic peer IDs
-// We try to claim "sumo-<phrase>-A". If that fails, we claim "sumo-<phrase>-B".
-// The "A" peer waits for connection from "B"; "B" connects to "A".
-
 function hashStr(s){
   let h = 5381;
   for (let i=0;i<s.length;i++) h = ((h<<5)+h+s.charCodeAt(i))|0;
@@ -118,7 +127,6 @@ async function startMatchmaking(phrase){
   const ids = makeIds(phrase);
   state.passphrase = phrase;
 
-  // Try to be "A" (host)
   try{
     const peer = await createPeer(ids.A);
     state.peer = peer;
@@ -135,7 +143,6 @@ async function startMatchmaking(phrase){
       console.warn('peer err', err);
     });
   }catch(err){
-    // ID taken => act as guest
     if(String(err && (err.type||err.message||'')).includes('unavailable') || (err && err.type === 'unavailable-id')){
       try{
         const peer = await createPeer(ids.B);
@@ -181,34 +188,25 @@ function safeSend(obj){
 
 // ---------- Connection established ----------
 function onConnected(){
-  // Initialize match
   state.scoreMe = 0; state.scoreOp = 0; state.round = 1; state.matchOver = false;
-  // Both sides go to game screen
   enterGame();
 }
 
 // ---------- Network protocol ----------
-// host -> guest : { t:'snap', s: gameState }
-// guest -> host : { t:'in',  i: input }
-// host -> guest : { t:'round', mine, opp, round, banner }
-// any -> any   : { t:'rematch' }
 function onPeerData(data){
   if(!data || typeof data !== 'object') return;
   switch(data.t){
     case 'snap':
-      // guest receives authoritative snapshot
       state.prevSnapshot = state.remoteSnapshot;
       state.remoteSnapshot = data.s;
       state.snapshotTime = performance.now();
       break;
     case 'in':
-      // host receives guest input
       if(state.mode==='host'){
         state.opInput = data.i;
       }
       break;
     case 'round':
-      // guest receives round result
       if(state.mode==='guest'){
         state.scoreMe = data.guestScore;
         state.scoreOp = data.hostScore;
@@ -237,7 +235,6 @@ function onPeerData(data){
 
 // ---------- Motion (Gyro) ----------
 async function ensureMotionPermission(){
-  // iOS 13+
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function'){
     try{
@@ -249,39 +246,40 @@ async function ensureMotionPermission(){
   attachOrientation();
   return true;
 }
+
 let _orientationAttached = false;
 function attachOrientation(){
   if(_orientationAttached) return;
   _orientationAttached = true;
   window.addEventListener('deviceorientation', (e) => {
-    const g = e.gamma; // -90..90 (left/right)
-    const b = e.beta;  // -180..180 (front/back)
+    const g = e.gamma;
+    const b = e.beta;
     if(g == null || b == null) return;
     state.motionRaw.gamma = g;
     state.motionRaw.beta = b;
     if(!state.hasReceivedMotion){
-      // First reading -> auto-calibrate to "this is neutral"
       state.motionCalibration.gamma = g;
       state.motionCalibration.beta  = b;
       state.hasReceivedMotion = true;
     }
     const dg = g - state.motionCalibration.gamma;
     const db = b - state.motionCalibration.beta;
-    // dead-zone of ~3deg, full tilt at ~25deg
     const tx = clamp(softZone(dg, 3, 25), -1, 1);
     const ty = clamp(softZone(db, 3, 25), -1, 1);
     state.motionTilt.x = tx;
     state.motionTilt.y = ty;
   }, true);
 }
+
 function softZone(v, dead, full){
   if(Math.abs(v) <= dead) return 0;
   const sign = v < 0 ? -1 : 1;
   return sign * Math.min(1, (Math.abs(v) - dead) / (full - dead));
 }
+
 function clamp(v, a, b){ return Math.max(a, Math.min(b,v)); }
 
-// ---------- Audio (WebAudio synth, no asset files) ----------
+// ---------- Audio (WebAudio synth) ----------
 let audioCtx = null;
 function ensureAudio(){
   if(!audioCtx){
@@ -290,29 +288,38 @@ function ensureAudio(){
   }
   if(audioCtx.state === 'suspended') audioCtx.resume();
 }
+
 function playSfx(kind){
   if(!audioCtx) return;
   const t0 = audioCtx.currentTime;
   if(kind === 'tackle'){
-    // low whoosh
     const o = audioCtx.createOscillator(), g = audioCtx.createGain();
     o.type='sawtooth'; o.frequency.setValueAtTime(180, t0); o.frequency.exponentialRampToValueAtTime(80, t0+0.18);
     g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.25, t0+0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.22);
     o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.25);
+  } else if(kind === 'spin'){
+    // スピンアタック音
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type='sine'; o.frequency.setValueAtTime(440, t0); o.frequency.exponentialRampToValueAtTime(220, t0+0.3);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.3, t0+0.05); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.35);
+    o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.4);
+  } else if(kind === 'defend'){
+    // 防御音
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type='triangle'; o.frequency.setValueAtTime(330, t0); o.frequency.exponentialRampToValueAtTime(220, t0+0.2);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.2, t0+0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.22);
+    o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.25);
   } else if(kind === 'hit'){
-    // wood thud
     const o = audioCtx.createOscillator(), g = audioCtx.createGain();
     o.type='triangle'; o.frequency.setValueAtTime(220, t0); o.frequency.exponentialRampToValueAtTime(80, t0+0.12);
     g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.35, t0+0.01); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.16);
     o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.18);
-    // noise burst
     const buf = audioCtx.createBuffer(1, audioCtx.sampleRate*0.08, audioCtx.sampleRate);
     const d = buf.getChannelData(0); for(let i=0;i<d.length;i++) d[i] = (Math.random()*2-1) * (1 - i/d.length);
     const n = audioCtx.createBufferSource(), ng = audioCtx.createGain();
     n.buffer = buf; ng.gain.value = 0.18;
     n.connect(ng).connect(audioCtx.destination); n.start(t0);
   } else if(kind === 'win'){
-    // happy chime
     [523, 659, 784].forEach((f, i) => {
       const o = audioCtx.createOscillator(), g = audioCtx.createGain();
       const s = t0 + i*0.12;
@@ -329,15 +336,20 @@ function playSfx(kind){
       o.connect(g).connect(audioCtx.destination); o.start(s); o.stop(s+0.5);
     });
   } else if(kind === 'bell'){
-    // round start bell
     const o = audioCtx.createOscillator(), g = audioCtx.createGain();
     o.type='sine'; o.frequency.setValueAtTime(880, t0); o.frequency.exponentialRampToValueAtTime(660, t0+0.6);
     g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.22, t0+0.01); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.7);
     o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.75);
+  } else if(kind === 'combo'){
+    // コンボ音
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type='sine'; o.frequency.setValueAtTime(600, t0); o.frequency.exponentialRampToValueAtTime(800, t0+0.1);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.15, t0+0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.12);
+    o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.15);
   }
 }
 
-// Touch fallback (drag on canvas) -- helps desktop testing & non-permission devices
+// Touch fallback
 function attachTouchFallback(canvas){
   let dragging = false, cx=0, cy=0;
   const start = (x,y)=>{ dragging=true; cx=x; cy=y; };
@@ -356,10 +368,13 @@ function attachTouchFallback(canvas){
   canvas.addEventListener('mousemove',  e => move(e.clientX,e.clientY));
   window.addEventListener('mouseup',    end);
 
-  // Keyboard for desktop
   const keys = {};
   window.addEventListener('keydown', e => { keys[e.key]=true; updateKeys(); });
-  window.addEventListener('keyup',   e => { keys[e.key]=false; updateKeys(); if(e.key===' '){ requestTackle(); }});
+  window.addEventListener('keyup',   e => { keys[e.key]=false; updateKeys(); 
+    if(e.key===' '){ requestTackle(); }
+    if(e.key==='q'){ requestSpin(); }
+    if(e.key==='e'){ requestDefend(); }
+  });
   function updateKeys(){
     let x=0,y=0;
     if(keys['ArrowLeft']||keys['a']) x-=1;
@@ -377,7 +392,7 @@ function enterGame(){
   showScreen('game');
   if(!_gameInited){
     setupCanvas();
-    setupTackleButton();
+    setupActionButtons();
     _gameInited = true;
   }
   setupMotion();
@@ -387,7 +402,6 @@ function enterGame(){
 }
 
 function setupMotion(){
-  // Show prompt for iOS-style permission once
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function' &&
       !state.myMotionEnabled){
@@ -397,41 +411,57 @@ function setupMotion(){
       const ok = await ensureMotionPermission();
       prompt.classList.add('hidden');
       if(!ok) {
-        // we still allow touch fallback
       }
     };
   } else {
-    // Try non-iOS attach; permission isn't needed
     attachOrientation();
     state.myMotionEnabled = true;
   }
 }
 
-function setupTackleButton(){
-  const btn = $('btn-tackle');
-  const fire = (e) => {
-    if(e) e.preventDefault();
-    requestTackle();
-  };
-  btn.ontouchstart = fire;
-  btn.onmousedown = fire;
+function setupActionButtons(){
+  const btnTackle = $('btn-tackle');
+  const btnSpin = $('btn-spin');
+  const btnDefend = $('btn-defend');
 
-  // Long-press the tackle button to recalibrate gyro neutral pose
+  const fire = (action, e) => {
+    if(e) e.preventDefault();
+    if(action === 'tackle') requestTackle();
+    else if(action === 'spin') requestSpin();
+    else if(action === 'defend') requestDefend();
+  };
+
+  if(btnTackle){
+    btnTackle.ontouchstart = (e) => fire('tackle', e);
+    btnTackle.onmousedown = (e) => fire('tackle', e);
+  }
+  if(btnSpin){
+    btnSpin.ontouchstart = (e) => fire('spin', e);
+    btnSpin.onmousedown = (e) => fire('spin', e);
+  }
+  if(btnDefend){
+    btnDefend.ontouchstart = (e) => fire('defend', e);
+    btnDefend.onmousedown = (e) => fire('defend', e);
+  }
+
+  // Long-press tackle button to recalibrate
   let pressTimer = null;
   const startPress = () => {
     pressTimer = setTimeout(() => {
-      state.hasReceivedMotion = false; // forces recalibrate on next reading
+      state.hasReceivedMotion = false;
       navigator.vibrate && navigator.vibrate([20,40,20]);
       flashMsg('構え直し（ジャイロ再調整）');
     }, 700);
   };
   const cancelPress = () => { if(pressTimer){ clearTimeout(pressTimer); pressTimer=null; } };
-  btn.addEventListener('touchstart', startPress, {passive:true});
-  btn.addEventListener('touchend', cancelPress);
-  btn.addEventListener('touchcancel', cancelPress);
-  btn.addEventListener('mousedown', startPress);
-  btn.addEventListener('mouseup', cancelPress);
-  btn.addEventListener('mouseleave', cancelPress);
+  if(btnTackle){
+    btnTackle.addEventListener('touchstart', startPress, {passive:true});
+    btnTackle.addEventListener('touchend', cancelPress);
+    btnTackle.addEventListener('touchcancel', cancelPress);
+    btnTackle.addEventListener('mousedown', startPress);
+    btnTackle.addEventListener('mouseup', cancelPress);
+    btnTackle.addEventListener('mouseleave', cancelPress);
+  }
 }
 
 function flashMsg(text){
@@ -454,22 +484,52 @@ function requestTackle(){
   playSfx('tackle');
 }
 
+function requestSpin(){
+  state.myInput.spin = true;
+  navigator.vibrate && navigator.vibrate([15, 10, 15]);
+  playSfx('spin');
+}
+
+function requestDefend(){
+  state.myInput.defend = true;
+  navigator.vibrate && navigator.vibrate(15);
+  playSfx('defend');
+}
+
 function initMatchState(){
-  // Both clients initialize game positions; host is authoritative.
   state.game = createInitialGameState();
   state.matchOver = false;
+  state.comboCount = 0;
+  state.comboResetTimer = 0;
 }
 
 function createInitialGameState(){
-  // host = red (player 1), guest = blue (player 2)
   return {
-    p1: { x: ARENA.size*0.5 - 180, y: ARENA.size*0.5, vx:0, vy:0, stamina: PLAYER.staminaMax, tackleT:0, cooldown:0, color:'red', alive:true },
-    p2: { x: ARENA.size*0.5 + 180, y: ARENA.size*0.5, vx:0, vy:0, stamina: PLAYER.staminaMax, tackleT:0, cooldown:0, color:'blue', alive:true },
+    p1: { 
+      x: ARENA.size*0.5 - 180, y: ARENA.size*0.5, 
+      vx:0, vy:0, 
+      stamina: PLAYER.staminaMax, 
+      specialGauge: 0,
+      tackleT:0, spinT:0, defendT:0, 
+      cooldown:0, spinCooldown:0, defendCooldown:0, 
+      color:'red', alive:true,
+      isDefending: false,
+    },
+    p2: { 
+      x: ARENA.size*0.5 + 180, y: ARENA.size*0.5, 
+      vx:0, vy:0, 
+      stamina: PLAYER.staminaMax, 
+      specialGauge: 0,
+      tackleT:0, spinT:0, defendT:0, 
+      cooldown:0, spinCooldown:0, defendCooldown:0, 
+      color:'blue', alive:true,
+      isDefending: false,
+    },
     t: 0,
     paused: true,
     countdown: ROUND.startCountdown,
     roundEnded: false,
-    winner: null, // 'p1'|'p2'|'draw'
+    winner: null,
   };
 }
 
@@ -545,24 +605,23 @@ function loop(){
   state.lastTime = now;
   if(dt > 0.05) dt = 0.05;
 
-  // Build my input from local sources
   state.myInput.tx = state.motionTilt.x;
   state.myInput.ty = state.motionTilt.y;
 
   if(state.mode === 'host' || state.mode === 'cpu'){
-    // simulate
     if(state.mode === 'cpu'){
-      // CPU produces opInput
       cpuThink(dt);
     }
     simulate(dt);
-    // send snapshot to guest
     if(state.mode === 'host'){
       sendSnapshot();
     }
-    // consume tackle press
     state.myInput.tackle = false;
+    state.myInput.spin = false;
+    state.myInput.defend = false;
     state.opInput.tackle = false;
+    state.opInput.spin = false;
+    state.opInput.defend = false;
     updateFx(dt);
   } else if (state.mode === 'guest'){
     state.myInput.seq = (state.myInput.seq+1)|0;
@@ -570,57 +629,74 @@ function loop(){
       tx: -state.myInput.tx,
       ty: -state.myInput.ty,
       tackle: state.myInput.tackle,
+      spin: state.myInput.spin,
+      defend: state.myInput.defend,
       seq: state.myInput.seq
     }});
     state.myInput.tackle = false;
+    state.myInput.spin = false;
+    state.myInput.defend = false;
     interpFromSnapshot();
     updateFx(dt);
+  }
+
+  // Update screen shake
+  state.screenShakeTime -= dt;
+  if(state.screenShakeTime < 0) state.screenShakeTime = 0;
+
+  // Update combo timer
+  state.comboResetTimer -= dt;
+  if(state.comboResetTimer < 0){
+    state.comboCount = 0;
   }
 
   render();
 }
 
-// ---------- Simulation (host authoritative) ----------
+// ---------- Simulation ----------
 function simulate(dt){
   const g = state.game;
   if(g.paused){
-    // countdown anim still ticks visually but no movement
     return;
   }
   if(g.roundEnded) return;
 
-  // Apply inputs
   applyInput(g.p1, state.myInput, dt);
   applyInput(g.p2, state.opInput, dt);
 
-  // Integrate
   integrate(g.p1, dt);
   integrate(g.p2, dt);
 
-  // Collision player-player
   resolveCollision(g.p1, g.p2);
 
-  // Stamina regen
   g.p1.stamina = Math.min(PLAYER.staminaMax, g.p1.stamina + PLAYER.staminaRegen*dt);
   g.p2.stamina = Math.min(PLAYER.staminaMax, g.p2.stamina + PLAYER.staminaRegen*dt);
 
-  // Cooldown / tackle timer
   g.p1.tackleT = Math.max(0, g.p1.tackleT - dt);
   g.p2.tackleT = Math.max(0, g.p2.tackleT - dt);
+  g.p1.spinT = Math.max(0, g.p1.spinT - dt);
+  g.p2.spinT = Math.max(0, g.p2.spinT - dt);
+  g.p1.defendT = Math.max(0, g.p1.defendT - dt);
+  g.p2.defendT = Math.max(0, g.p2.defendT - dt);
   g.p1.cooldown = Math.max(0, g.p1.cooldown - dt);
   g.p2.cooldown = Math.max(0, g.p2.cooldown - dt);
+  g.p1.spinCooldown = Math.max(0, g.p1.spinCooldown - dt);
+  g.p2.spinCooldown = Math.max(0, g.p2.spinCooldown - dt);
+  g.p1.defendCooldown = Math.max(0, g.p1.defendCooldown - dt);
+  g.p2.defendCooldown = Math.max(0, g.p2.defendCooldown - dt);
 
-  // Out of ring check
+  g.p1.isDefending = g.p1.defendT > 0;
+  g.p2.isDefending = g.p2.defendT > 0;
+
   const cx = ARENA.size/2, cy = ARENA.size/2;
   const r = ARENA.ringRadius;
-  const out1 = dist(g.p1.x,g.p1.y,cx,cy) > r + 4; // center out of ring
+  const out1 = dist(g.p1.x,g.p1.y,cx,cy) > r + 4;
   const out2 = dist(g.p2.x,g.p2.y,cx,cy) > r + 4;
 
   if(out1 || out2){
     g.roundEnded = true;
     let winner = null;
     if(out1 && out2){
-      // who fell first - approximate by which is further out
       const d1 = dist(g.p1.x,g.p1.y,cx,cy);
       const d2 = dist(g.p2.x,g.p2.y,cx,cy);
       winner = (d1>d2) ? 'p2' : 'p1';
@@ -635,12 +711,13 @@ function simulate(dt){
 
 function applyInput(p, inp, dt){
   if(!p.alive) return;
-  // Tackle?
-  if(inp.tackle && p.cooldown<=0 && p.stamina>=PLAYER.tackleStaminaCost){
-    p.stamina -= PLAYER.tackleStaminaCost;
-    p.tackleT = PLAYER.tackleDuration;
-    p.cooldown = PLAYER.tackleCooldown;
-    // boost in current input direction (or current vel if no tilt)
+
+  // Spin attack
+  if(inp.spin && p.spinCooldown<=0 && p.stamina>=PLAYER.spinStaminaCost){
+    p.stamina -= PLAYER.spinStaminaCost;
+    p.spinT = PLAYER.spinDuration;
+    p.spinCooldown = PLAYER.spinCooldown;
+    p.specialGauge = Math.min(PLAYER.specialGaugeMax, p.specialGauge + 20);
     const mag = Math.hypot(inp.tx, inp.ty);
     let dx, dy;
     if(mag > 0.05){ dx = inp.tx/mag; dy = inp.ty/mag; }
@@ -649,23 +726,44 @@ function applyInput(p, inp, dt){
       if(vmag>1){ dx = p.vx/vmag; dy = p.vy/vmag; }
       else { dx = (p===state.game.p1?1:-1); dy = 0; }
     }
-    p.vx += dx * 420;  // タックル威力強化
+    p.vx += dx * 480;
+    p.vy += dy * 480;
+  }
+
+  // Defend
+  if(inp.defend && p.defendCooldown<=0 && p.stamina>=PLAYER.defenseStaminaCost){
+    p.stamina -= PLAYER.defenseStaminaCost;
+    p.defendT = PLAYER.defenseDuration;
+    p.defendCooldown = PLAYER.defenseCooldown;
+  }
+
+  // Tackle
+  if(inp.tackle && p.cooldown<=0 && p.stamina>=PLAYER.tackleStaminaCost){
+    p.stamina -= PLAYER.tackleStaminaCost;
+    p.tackleT = PLAYER.tackleDuration;
+    p.cooldown = PLAYER.tackleCooldown;
+    const mag = Math.hypot(inp.tx, inp.ty);
+    let dx, dy;
+    if(mag > 0.05){ dx = inp.tx/mag; dy = inp.ty/mag; }
+    else {
+      const vmag = Math.hypot(p.vx,p.vy);
+      if(vmag>1){ dx = p.vx/vmag; dy = p.vy/vmag; }
+      else { dx = (p===state.game.p1?1:-1); dy = 0; }
+    }
+    p.vx += dx * 420;
     p.vy += dy * 420;
   }
 
-  // Normal acceleration
-  const accel = (p.tackleT>0) ? PLAYER.tackleAccel : PLAYER.accel;
+  const accel = (p.tackleT>0 || p.spinT>0) ? PLAYER.tackleAccel : PLAYER.accel;
   p.vx += inp.tx * accel * dt;
   p.vy += inp.ty * accel * dt;
 
-  // Cap speed
-  const maxV = (p.tackleT>0) ? PLAYER.maxSpeed*1.7 : PLAYER.maxSpeed;
+  const maxV = (p.tackleT>0 || p.spinT>0) ? PLAYER.maxSpeed*1.7 : PLAYER.maxSpeed;
   const sp = Math.hypot(p.vx,p.vy);
   if(sp>maxV){ p.vx*=maxV/sp; p.vy*=maxV/sp; }
 }
 
 function integrate(p, dt){
-  // friction
   const f = Math.pow(PLAYER.friction, dt*60);
   p.vx *= f; p.vy *= f;
   p.x += p.vx * dt;
@@ -684,38 +782,53 @@ function resolveCollision(a,b){
   const rvx = b.vx-a.vx, rvy = b.vy-a.vy;
   const vn = rvx*nx + rvy*ny;
   if(vn > 0) return;
+
+  // Defense damage reduction
+  let damageMultiplier = 1.0;
+  if(a.isDefending) damageMultiplier *= 0.6;
+  if(b.isDefending) damageMultiplier *= 0.6;
+
   const e = PLAYER.restitution;
-  const bonusA = (a.tackleT>0)?1.6:1.0;
-  const bonusB = (b.tackleT>0)?1.6:1.0;
+  const bonusA = (a.tackleT>0 || a.spinT>0)?1.6:1.0;
+  const bonusB = (b.tackleT>0 || b.spinT>0)?1.6:1.0;
   const j = -(1+e)*vn / 2;
-  const ja = j*bonusA, jb = j*bonusB;
+  const ja = j*bonusA*damageMultiplier, jb = j*bonusB*damageMultiplier;
   a.vx -= ja*nx; a.vy -= ja*ny;
   b.vx += jb*nx; b.vy += jb*ny;
-
-  if(a.tackleT>0){ b.vx += nx*240; b.vy += ny*240; }  // タックル時の追加押し出し力強化
+  if(a.tackleT>0){ b.vx += nx*240; b.vy += ny*240; }
   if(b.tackleT>0){ a.vx -= nx*240; a.vy -= ny*240; }
+  if(a.spinT>0){ b.vx += nx*280; b.vy += ny*280; }
+  if(b.spinT>0){ a.vx -= nx*280; a.vy -= ny*280; }
 
-  // Haptic + sfx (impact strength gates)
   const strength = Math.abs(vn);
   if(strength > 60){
-    navigator.vibrate && navigator.vibrate(20);  // バイブレーション強化
+    navigator.vibrate && navigator.vibrate(20);
     playSfx('hit');
     spawnImpactFx((a.x+b.x)/2, (a.y+b.y)/2);
+    state.screenShakeIntensity = Math.min(8, strength/100);
+    state.screenShakeTime = 0.1;
+    state.comboCount++;
+    state.comboResetTimer = 1.0;
+    if(state.comboCount > 1){
+      playSfx('combo');
+    }
+    a.specialGauge = Math.min(PLAYER.specialGaugeMax, a.specialGauge + PLAYER.specialGaugePerHit);
+    b.specialGauge = Math.min(PLAYER.specialGaugeMax, b.specialGauge + PLAYER.specialGaugePerHit);
   }
 }
 
 // ---------- FX particles ----------
 const fxParticles = [];
 function spawnImpactFx(x,y){
-  for(let i=0;i<16;i++){  // パーティクル数を10から16に増加
+  for(let i=0;i<16;i++){
     const a = Math.random()*Math.PI*2;
-    const sp = 80 + Math.random()*220;  // スピード強化
+    const sp = 80 + Math.random()*220;
     fxParticles.push({
       x, y,
       vx: Math.cos(a)*sp, vy: Math.sin(a)*sp,
       life: 0.4 + Math.random()*0.3,
       max: 0.6,
-      size: 5 + Math.random()*5,  // サイズ強化
+      size: 5 + Math.random()*5,
     });
   }
 }
@@ -737,21 +850,15 @@ function drawFx(){
     ctx.fill();
   }
 }
-
 function dist(x1,y1,x2,y2){ const dx=x2-x1, dy=y2-y1; return Math.hypot(dx,dy); }
 
 // ---------- Round end ----------
 function onRoundEnd(winner){
-  // host POV: p1=me, p2=opponent
   let myWin = (winner === 'p1');
   if(state.mode === 'cpu'){
-    // p1 is me, p2 is cpu
   }
   if(myWin) state.scoreMe++; else state.scoreOp++;
-
   const matchOver = (state.scoreMe>=ROUND.winsToMatch || state.scoreOp>=ROUND.winsToMatch);
-
-  // notify guest
   if(state.mode === 'host'){
     safeSend({
       t:'round',
@@ -762,10 +869,8 @@ function onRoundEnd(winner){
       matchOver
     });
   }
-
   updateScoreUI();
   showRoundBannerWithSub(myWin? '勝ち！' : '負け…', `${state.scoreMe} － ${state.scoreOp}`, myWin?'red':'blue');
-
   if(matchOver){
     setTimeout(()=> showResult(myWin), 1500);
   } else {
@@ -777,7 +882,7 @@ function onRoundEnd(winner){
   }
 }
 
-// ---------- Snapshot for guest (sent ~30Hz directly from loop) ----------
+// ---------- Snapshot for guest ----------
 let lastSnapAt = 0;
 function sendSnapshot(){
   const now = performance.now();
@@ -796,10 +901,10 @@ function sendSnapshot(){
   safeSend({ t:'snap', s: snap });
 }
 function pack(p){
-  return [Math.round(p.x), Math.round(p.y), Math.round(p.vx), Math.round(p.vy), Math.round(p.stamina), Math.round(p.tackleT*1000), Math.round(p.cooldown*1000)];
+  return [Math.round(p.x), Math.round(p.y), Math.round(p.vx), Math.round(p.vy), Math.round(p.stamina), Math.round(p.specialGauge), Math.round(p.tackleT*1000), Math.round(p.spinT*1000), Math.round(p.defendT*1000), Math.round(p.cooldown*1000), p.isDefending?1:0];
 }
 function unpack(arr){
-  return { x:arr[0], y:arr[1], vx:arr[2], vy:arr[3], stamina:arr[4], tackleT:arr[5]/1000, cooldown:arr[6]/1000, alive:true, color: null };
+  return { x:arr[0], y:arr[1], vx:arr[2], vy:arr[3], stamina:arr[4], specialGauge:arr[5], tackleT:arr[6]/1000, spinT:arr[7]/1000, defendT:arr[8]/1000, cooldown:arr[9]/1000, isDefending:arr[10]?true:false, alive:true, color: null };
 }
 
 function interpFromSnapshot(){
@@ -812,7 +917,6 @@ function interpFromSnapshot(){
   state.game.paused = !!s.paused;
   state.game.roundEnded = !!s.roundEnded;
   if(s.score){
-    // For guest, host's scoreMe = guest's scoreOp
     state.scoreOp = s.score[0];
     state.scoreMe = s.score[1];
     updateScoreUI();
@@ -830,13 +934,19 @@ function render(){
   const w = window.innerWidth, h = window.innerHeight;
   ctx.clearRect(0,0,w,h);
 
-  // translate to arena
   ctx.save();
+  
+  // Screen shake effect
+  if(state.screenShakeTime > 0){
+    const shake = state.screenShakeIntensity;
+    const shakeX = (Math.random() - 0.5) * shake * 2;
+    const shakeY = (Math.random() - 0.5) * shake * 2;
+    ctx.translate(shakeX, shakeY);
+  }
+
   ctx.translate(offsetX, offsetY);
   ctx.scale(scale, scale);
 
-  // For guest, rotate the whole world 180° so their character appears at bottom.
-  // Note: we also invert their tilt input upstream, so controls remain natural.
   if(state.mode === 'guest'){
     ctx.translate(ARENA.size, ARENA.size);
     ctx.rotate(Math.PI);
@@ -844,8 +954,6 @@ function render(){
 
   drawDohyo();
 
-  // host: me=p1, op=p2
-  // guest: me=p2, op=p1 (rendered upside-down so visually 'me' appears at bottom)
   let me, op;
   if(state.mode === 'guest'){
     me = state.game.p2; op = state.game.p1;
@@ -860,32 +968,53 @@ function render(){
 
   ctx.restore();
 
-  // Stamina UI
+  // UI
   const myStamina = me.stamina;
+  const mySpecial = me.specialGauge;
   $('stamina-fill').style.width = (myStamina/PLAYER.staminaMax*100)+'%';
-  $('btn-tackle').classList.toggle('cooldown', myStamina < PLAYER.tackleStaminaCost || me.cooldown>0);
+  const specialEl = $('special-fill');
+  if(specialEl){
+    specialEl.style.width = (mySpecial/PLAYER.specialGaugeMax*100)+'%';
+  }
 
-  // countdown overlay
+  const btnTackle = $('btn-tackle');
+  if(btnTackle){
+    btnTackle.classList.toggle('cooldown', myStamina < PLAYER.tackleStaminaCost || me.cooldown>0);
+  }
+  const btnSpin = $('btn-spin');
+  if(btnSpin){
+    btnSpin.classList.toggle('cooldown', myStamina < PLAYER.spinStaminaCost || me.spinCooldown>0);
+  }
+  const btnDefend = $('btn-defend');
+  if(btnDefend){
+    btnDefend.classList.toggle('cooldown', myStamina < PLAYER.defenseStaminaCost || me.defendCooldown>0);
+  }
+
+  // Combo display
+  if(state.comboCount > 1){
+    ctx.save();
+    ctx.translate(offsetX + window.innerWidth/2, offsetY + 120);
+    ctx.scale(1/scale, 1/scale);
+    ctx.fillStyle = 'rgba(255,200,0,0.8)';
+    ctx.font = 'bold 48px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`COMBO x${state.comboCount}`, 0, 0);
+    ctx.restore();
+  }
+
   if(state.game.paused){
     drawCountdown(w,h);
   }
 }
 
-function drawPlanks(w,h){
-  // background already CSS gradient; nothing extra to keep it light
-}
-
 function drawDohyo(){
   const cx = ARENA.size/2, cy = ARENA.size/2;
-  // outer square (tatami)
   ctx.fillStyle = '#cdb070';
   ctx.fillRect(40,40,ARENA.size-80, ARENA.size-80);
-  // border
   ctx.strokeStyle = '#6b4a22';
   ctx.lineWidth = 6;
   ctx.strokeRect(40,40,ARENA.size-80, ARENA.size-80);
 
-  // ring (clay)
   const grad = ctx.createRadialGradient(cx,cy-60,80, cx,cy, ARENA.ringRadius);
   grad.addColorStop(0, '#e3b67a');
   grad.addColorStop(1, '#a76f3a');
@@ -894,7 +1023,6 @@ function drawDohyo(){
   ctx.arc(cx,cy, ARENA.ringRadius, 0, Math.PI*2);
   ctx.fill();
 
-  // straw bales (white circle outline)
   ctx.lineWidth = 18;
   ctx.strokeStyle = '#f1e1bc';
   ctx.beginPath();
@@ -906,14 +1034,10 @@ function drawDohyo(){
   ctx.arc(cx,cy, ARENA.ringRadius-10, 0, Math.PI*2);
   ctx.stroke();
 
-  // center lines
   ctx.fillStyle = '#fff';
   ctx.fillRect(cx-50, cy-2, 100, 4);
   ctx.fillRect(cx-50, cy-50, 100, 4);
   ctx.fillRect(cx-50, cy+46, 100, 4);
-
-  // sand grain noise
-  // (skipped to keep mobile perf)
 }
 
 function drawShadow(p){
@@ -924,7 +1048,6 @@ function drawShadow(p){
 }
 
 function drawRikishi(p, color, isMe){
-  // body
   const r = PLAYER.radius;
   const grad = ctx.createRadialGradient(p.x-r*0.4, p.y-r*0.4, r*0.2, p.x, p.y, r);
   grad.addColorStop(0, lighten(color, 0.2));
@@ -934,7 +1057,7 @@ function drawRikishi(p, color, isMe){
   ctx.arc(p.x, p.y, r, 0, Math.PI*2);
   ctx.fill();
 
-  // mawashi (belt)
+  // mawashi
   ctx.fillStyle = isMe ? '#f5e6c4' : '#dcd0b0';
   ctx.beginPath();
   ctx.arc(p.x, p.y+6, r*0.7, 0, Math.PI, false);
@@ -954,7 +1077,6 @@ function drawRikishi(p, color, isMe){
     ctx.beginPath();
     ctx.arc(p.x,p.y, r+8, 0, Math.PI*2);
     ctx.stroke();
-    // motion lines
     const dir = Math.atan2(p.vy, p.vx);
     ctx.strokeStyle = 'rgba(255,255,255,0.7)';
     ctx.lineWidth = 3;
@@ -968,7 +1090,31 @@ function drawRikishi(p, color, isMe){
     }
   }
 
-  // marker (you) — counter-rotate text for guest so it reads upright
+  // spin aura
+  if(p.spinT>0){
+    ctx.strokeStyle = 'rgba(200,255,100,0.6)';
+    ctx.lineWidth = 6;
+    const rotation = (performance.now() / 200) % (Math.PI*2);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r+12, rotation, rotation + Math.PI*0.7);
+    ctx.stroke();
+  }
+
+  // defense shield
+  if(p.isDefending){
+    ctx.strokeStyle = 'rgba(100,150,255,0.5)';
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r+16, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(100,150,255,0.3)';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r+20, 0, Math.PI*2);
+    ctx.stroke();
+  }
+
+  // marker
   if(isMe){
     ctx.save();
     if(state.mode === 'guest'){
@@ -989,7 +1135,6 @@ function drawRikishi(p, color, isMe){
 }
 
 function lighten(hex, amt){
-  // hex like #aabbcc
   const c = hex.replace('#','');
   const r = parseInt(c.slice(0,2),16);
   const g = parseInt(c.slice(2,4),16);
@@ -999,8 +1144,6 @@ function lighten(hex, amt){
 }
 
 function drawCountdown(w,h){
-  // countdown via game time prefix
-  // We don't track countdown numbers precisely (banner does). Skip dim overlay.
 }
 
 // ---------- Result ----------
@@ -1018,7 +1161,7 @@ function showResult(win){
 $('btn-rematch').onclick = () => {
   if(state.mode === 'cpu'){
     state.scoreMe=0; state.scoreOp=0; state.round=1;
-    enterGame(); // restart
+    enterGame();
     return;
   }
   if(state.mode === 'guest'){
@@ -1036,12 +1179,6 @@ $('btn-back').onclick = () => {
   showScreen('lobby');
   setStatus('');
 };
-function cleanupConn(){
-  try{ if(state.conn) state.conn.close(); }catch(e){}
-  try{ if(state.peer) state.peer.destroy(); }catch(e){}
-  state.conn = null; state.peer = null;
-  if(state.rafId){ cancelAnimationFrame(state.rafId); state.rafId=null; }
-}
 function cleanupConn(){
   try{ if(state.conn) state.conn.close(); }catch(e){}
   try{ if(state.peer) state.peer.destroy(); }catch(e){}
@@ -1068,12 +1205,12 @@ $('btn-match').onclick = async () => {
 $('btn-solo').onclick = async () => {
   state.mode = 'cpu';
   state.scoreMe = 0; state.scoreOp = 0; state.round=1;
+  state.cpuDifficulty = 'normal';
   ensureAudio();
   try { await ensureMotionPermission(); } catch(e){}
   enterGame();
 };
 
-// Auto-start solo via URL for testing
 if (new URLSearchParams(location.search).get('autoSolo') === '1'){
   setTimeout(() => $('btn-solo').click(), 300);
 }
@@ -1081,19 +1218,16 @@ if (new URLSearchParams(location.search).get('autoSolo') === '1'){
 // ---------- CPU ----------
 function cpuThink(dt){
   const g = state.game;
-  if(g.paused || g.roundEnded){ state.opInput = {tx:0,ty:0,tackle:false,seq:0}; return; }
-  const me = g.p2; // CPU is p2
+  if(g.paused || g.roundEnded){ state.opInput = {tx:0,ty:0,tackle:false,spin:false,defend:false,seq:0}; return; }
+  const me = g.p2;
   const target = g.p1;
   const cx = ARENA.size/2, cy = ARENA.size/2;
-  // Aim toward player; if player is near edge, push outward more
   const dx = target.x - me.x;
   const dy = target.y - me.y;
   const d = Math.hypot(dx,dy)||1;
 
-  // direction toward target
   let ix = dx/d, iy = dy/d;
 
-  // if player is near edge, push from opposite of center (extra)
   const pdToCenter = Math.hypot(target.x-cx, target.y-cy);
   if(pdToCenter > ARENA.ringRadius*0.6){
     const ox = (target.x - cx)/Math.max(1,pdToCenter);
@@ -1102,25 +1236,32 @@ function cpuThink(dt){
     const m = Math.hypot(ix,iy)||1;
     ix/=m; iy/=m;
   }
-  // avoid going off ring myself
   const myDtoC = Math.hypot(me.x-cx, me.y-cy);
   if(myDtoC > ARENA.ringRadius*0.78){
-    // pull toward center
     ix = (cx-me.x)/Math.max(1,myDtoC);
     iy = (cy-me.y)/Math.max(1,myDtoC);
   }
 
-  // jitter
   ix += (Math.random()-0.5)*0.1;
   iy += (Math.random()-0.5)*0.1;
 
   state.opInput.tx = clamp(ix, -1, 1);
   state.opInput.ty = clamp(iy, -1, 1);
 
-  // tackle when close & aligned & has stamina
   state.opInput.tackle = false;
-  if(d < PLAYER.radius*3 && me.stamina > 50 && me.cooldown<=0 && Math.random()<0.04){
+  state.opInput.spin = false;
+  state.opInput.defend = false;
+
+  const difficulty = state.cpuDifficulty === 'hard' ? 0.08 : (state.cpuDifficulty === 'easy' ? 0.02 : 0.04);
+
+  if(d < PLAYER.radius*3 && me.stamina > 50 && me.cooldown<=0 && Math.random()<difficulty){
     state.opInput.tackle = true;
+  }
+  if(d < PLAYER.radius*4 && me.stamina > 60 && me.spinCooldown<=0 && Math.random()<difficulty*0.6){
+    state.opInput.spin = true;
+  }
+  if(d < PLAYER.radius*2.5 && me.stamina > 40 && me.defendCooldown<=0 && target.tackleT>0 && Math.random()<difficulty*0.8){
+    state.opInput.defend = true;
   }
 }
 
