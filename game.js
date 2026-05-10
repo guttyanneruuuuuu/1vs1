@@ -32,16 +32,16 @@ const ARENA = {
 const PLAYER = {
   radius: 56,
   mass: 1.0,
-  accel: 1300,           // px/s^2 (logical)
-  maxSpeed: 520,
+  accel: 1600,           // px/s^2 (logical) - 強化
+  maxSpeed: 650,         // 強化
   friction: 0.86,        // per-frame multiplicative
-  tackleAccel: 4200,
+  tackleAccel: 5500,     // 強化
   tackleDuration: 0.28,  // sec
   tackleCooldown: 1.1,   // sec
   tackleStaminaCost: 35,
   staminaMax: 100,
   staminaRegen: 28,      // per sec
-  restitution: 1.05,
+  restitution: 1.15,    // 強化 - より強い反発
 };
 const ROUND = {
   winsToMatch: 2,
@@ -649,8 +649,8 @@ function applyInput(p, inp, dt){
       if(vmag>1){ dx = p.vx/vmag; dy = p.vy/vmag; }
       else { dx = (p===state.game.p1?1:-1); dy = 0; }
     }
-    p.vx += dx * 320;
-    p.vy += dy * 320;
+    p.vx += dx * 420;  // タックル威力強化
+    p.vy += dy * 420;
   }
 
   // Normal acceleration
@@ -692,13 +692,13 @@ function resolveCollision(a,b){
   a.vx -= ja*nx; a.vy -= ja*ny;
   b.vx += jb*nx; b.vy += jb*ny;
 
-  if(a.tackleT>0){ b.vx += nx*180; b.vy += ny*180; }
-  if(b.tackleT>0){ a.vx -= nx*180; a.vy -= ny*180; }
+  if(a.tackleT>0){ b.vx += nx*240; b.vy += ny*240; }  // タックル時の追加押し出し力強化
+  if(b.tackleT>0){ a.vx -= nx*240; a.vy -= ny*240; }
 
   // Haptic + sfx (impact strength gates)
   const strength = Math.abs(vn);
   if(strength > 60){
-    navigator.vibrate && navigator.vibrate(15);
+    navigator.vibrate && navigator.vibrate(20);  // バイブレーション強化
     playSfx('hit');
     spawnImpactFx((a.x+b.x)/2, (a.y+b.y)/2);
   }
@@ -707,15 +707,15 @@ function resolveCollision(a,b){
 // ---------- FX particles ----------
 const fxParticles = [];
 function spawnImpactFx(x,y){
-  for(let i=0;i<10;i++){
+  for(let i=0;i<16;i++){  // パーティクル数を10から16に増加
     const a = Math.random()*Math.PI*2;
-    const sp = 60 + Math.random()*180;
+    const sp = 80 + Math.random()*220;  // スピード強化
     fxParticles.push({
       x, y,
       vx: Math.cos(a)*sp, vy: Math.sin(a)*sp,
       life: 0.4 + Math.random()*0.3,
       max: 0.6,
-      size: 4 + Math.random()*4,
+      size: 5 + Math.random()*5,  // サイズ強化
     });
   }
 }
