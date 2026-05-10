@@ -10,39 +10,41 @@
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 </head>
 <body>
-
 <!-- LOBBY SCREEN -->
 <div id="lobby" class="screen active">
   <div class="paper">
     <h1 class="title">土<span class="brush">俵</span>バトル</h1>
     <p class="subtitle">スマホを傾けて操作する 1対1 相撲ゲーム</p>
-
     <div class="rules">
       <h3>遊び方</h3>
       <ul>
         <li>スマホを<b>傾けて</b>力士を動かす</li>
         <li>相手にぶつかって<b>土俵の外</b>に押し出せば勝ち</li>
-        <li>画面下のボタンで<b>突進(タックル)</b>。スタミナを消費</li>
+        <li>画面下のボタンで<b>アクション</b>を実行（スタミナ消費）
+          <ul style="margin-top:6px; font-size:12px;">
+            <li><b>突進</b>: 基本的なタックル</li>
+            <li><b>スピン</b>: より強力な回転攻撃</li>
+            <li><b>防御</b>: ダメージを軽減する防御ポーズ</li>
+          </ul>
+        </li>
+        <li>連続ヒットで<b>コンボ</b>が発生！</li>
         <li>3本勝負（先に2本取った方の勝ち）</li>
       </ul>
     </div>
-
     <div class="match-area">
       <label>合言葉（同じ言葉を2人で入れる）</label>
       <input id="passphrase" type="text" placeholder="例: さくら2025" maxlength="24" autocomplete="off" />
       <button id="btn-match" class="btn primary">対戦開始</button>
       <button id="btn-solo" class="btn ghost">１人で動作確認（CPU戦）</button>
     </div>
-
     <div id="status" class="status"></div>
-
     <div class="footnote">
       ※ iPhoneの場合、初回に「動きの許可」をタップしてください<br/>
-      ※ 通信は P2P（PeerJS公開サーバ経由）です
+      ※ 通信は P2P（PeerJS公開サーバ経由）です<br/>
+      ※ キーボード: 矢印キー移動、スペース=突進、Q=スピン、E=防御
     </div>
   </div>
 </div>
-
 <!-- GAME SCREEN -->
 <div id="game" class="screen">
   <div id="hud">
@@ -55,22 +57,21 @@
     </div>
     <div class="round" id="round-label">第１番</div>
   </div>
-
   <canvas id="canvas"></canvas>
-
   <div id="stamina-wrap">
     <div id="stamina-bar"><div id="stamina-fill"></div></div>
   </div>
-
-  <button id="btn-tackle" class="tackle-btn">突<br>進</button>
-
+  <div id="special-wrap">
+    <div id="special-bar"><div id="special-fill"></div></div>
+  </div>
+  <button id="btn-tackle" class="action-btn tackle-btn">突<br>進</button>
+  <button id="btn-spin" class="action-btn spin-btn">スピン</button>
+  <button id="btn-defend" class="action-btn defend-btn">防<br>御</button>
   <div id="banner" class="banner hidden"></div>
-
   <div id="enable-motion" class="motion-prompt hidden">
     <button id="btn-enable-motion" class="btn primary">動きセンサーを許可</button>
   </div>
 </div>
-
 <!-- RESULT SCREEN -->
 <div id="result" class="screen">
   <div class="paper">
@@ -80,7 +81,6 @@
     <button id="btn-back" class="btn ghost">ロビーへ戻る</button>
   </div>
 </div>
-
 <script src="game.js"></script>
 </body>
 </html>
