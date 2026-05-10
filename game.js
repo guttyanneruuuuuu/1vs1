@@ -58,6 +58,9 @@ const state = {
   passphrase: null,
   myMotionEnabled: false,
   motionTilt: { x:0, y:0 }, // -1..1
+  motionRaw: { gamma: 0, beta: 0 },
+  motionCalibration: { gamma: 0, beta: 30 }, // subtracted before normalize
+  hasReceivedMotion: false,
   // Authoritative shared state
   game: null,
   // Inputs received from opponent (latest)
@@ -246,19 +249,93 @@ async function ensureMotionPermission(){
   attachOrientation();
   return true;
 }
+let _orientationAttached = false;
 function attachOrientation(){
+  if(_orientationAttached) return;
+  _orientationAttached = true;
   window.addEventListener('deviceorientation', (e) => {
-    // gamma: left-right tilt -90..90, beta: front-back -180..180
-    const g = e.gamma || 0;
-    const b = e.beta  || 0;
-    // Use orientation; cap and normalize
-    const tx = clamp(g / 35, -1, 1);    // tilt left/right
-    const ty = clamp((b - 30) / 35, -1, 1); // tilt forward (subtract typical hold angle)
+    const g = e.gamma; // -90..90 (left/right)
+    const b = e.beta;  // -180..180 (front/back)
+    if(g == null || b == null) return;
+    state.motionRaw.gamma = g;
+    state.motionRaw.beta = b;
+    if(!state.hasReceivedMotion){
+      // First reading -> auto-calibrate to "this is neutral"
+      state.motionCalibration.gamma = g;
+      state.motionCalibration.beta  = b;
+      state.hasReceivedMotion = true;
+    }
+    const dg = g - state.motionCalibration.gamma;
+    const db = b - state.motionCalibration.beta;
+    // dead-zone of ~3deg, full tilt at ~25deg
+    const tx = clamp(softZone(dg, 3, 25), -1, 1);
+    const ty = clamp(softZone(db, 3, 25), -1, 1);
     state.motionTilt.x = tx;
     state.motionTilt.y = ty;
   }, true);
 }
+function softZone(v, dead, full){
+  if(Math.abs(v) <= dead) return 0;
+  const sign = v < 0 ? -1 : 1;
+  return sign * Math.min(1, (Math.abs(v) - dead) / (full - dead));
+}
 function clamp(v, a, b){ return Math.max(a, Math.min(b,v)); }
+
+// ---------- Audio (WebAudio synth, no asset files) ----------
+let audioCtx = null;
+function ensureAudio(){
+  if(!audioCtx){
+    try { audioCtx = new (window.AudioContext||window.webkitAudioContext)(); }
+    catch(e){ return; }
+  }
+  if(audioCtx.state === 'suspended') audioCtx.resume();
+}
+function playSfx(kind){
+  if(!audioCtx) return;
+  const t0 = audioCtx.currentTime;
+  if(kind === 'tackle'){
+    // low whoosh
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type='sawtooth'; o.frequency.setValueAtTime(180, t0); o.frequency.exponentialRampToValueAtTime(80, t0+0.18);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.25, t0+0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.22);
+    o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.25);
+  } else if(kind === 'hit'){
+    // wood thud
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type='triangle'; o.frequency.setValueAtTime(220, t0); o.frequency.exponentialRampToValueAtTime(80, t0+0.12);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.35, t0+0.01); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.16);
+    o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.18);
+    // noise burst
+    const buf = audioCtx.createBuffer(1, audioCtx.sampleRate*0.08, audioCtx.sampleRate);
+    const d = buf.getChannelData(0); for(let i=0;i<d.length;i++) d[i] = (Math.random()*2-1) * (1 - i/d.length);
+    const n = audioCtx.createBufferSource(), ng = audioCtx.createGain();
+    n.buffer = buf; ng.gain.value = 0.18;
+    n.connect(ng).connect(audioCtx.destination); n.start(t0);
+  } else if(kind === 'win'){
+    // happy chime
+    [523, 659, 784].forEach((f, i) => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      const s = t0 + i*0.12;
+      o.type='triangle'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, s); g.gain.exponentialRampToValueAtTime(0.2, s+0.02); g.gain.exponentialRampToValueAtTime(0.0001, s+0.35);
+      o.connect(g).connect(audioCtx.destination); o.start(s); o.stop(s+0.4);
+    });
+  } else if(kind === 'lose'){
+    [330, 262, 220].forEach((f, i) => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      const s = t0 + i*0.14;
+      o.type='sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, s); g.gain.exponentialRampToValueAtTime(0.18, s+0.02); g.gain.exponentialRampToValueAtTime(0.0001, s+0.45);
+      o.connect(g).connect(audioCtx.destination); o.start(s); o.stop(s+0.5);
+    });
+  } else if(kind === 'bell'){
+    // round start bell
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type='sine'; o.frequency.setValueAtTime(880, t0); o.frequency.exponentialRampToValueAtTime(660, t0+0.6);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.22, t0+0.01); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.7);
+    o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.75);
+  }
+}
 
 // Touch fallback (drag on canvas) -- helps desktop testing & non-permission devices
 function attachTouchFallback(canvas){
@@ -338,12 +415,43 @@ function setupTackleButton(){
   };
   btn.ontouchstart = fire;
   btn.onmousedown = fire;
+
+  // Long-press the tackle button to recalibrate gyro neutral pose
+  let pressTimer = null;
+  const startPress = () => {
+    pressTimer = setTimeout(() => {
+      state.hasReceivedMotion = false; // forces recalibrate on next reading
+      navigator.vibrate && navigator.vibrate([20,40,20]);
+      flashMsg('構え直し（ジャイロ再調整）');
+    }, 700);
+  };
+  const cancelPress = () => { if(pressTimer){ clearTimeout(pressTimer); pressTimer=null; } };
+  btn.addEventListener('touchstart', startPress, {passive:true});
+  btn.addEventListener('touchend', cancelPress);
+  btn.addEventListener('touchcancel', cancelPress);
+  btn.addEventListener('mousedown', startPress);
+  btn.addEventListener('mouseup', cancelPress);
+  btn.addEventListener('mouseleave', cancelPress);
+}
+
+function flashMsg(text){
+  let el = document.getElementById('flash-msg');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'flash-msg';
+    el.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);background:rgba(40,28,16,.85);color:#fbf2d9;padding:8px 18px;border-radius:18px;z-index:30;font-size:14px;letter-spacing:.1em;pointer-events:none;transition:opacity .3s;';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.style.opacity = '1';
+  clearTimeout(flashMsg._t);
+  flashMsg._t = setTimeout(()=> { el.style.opacity='0'; }, 1400);
 }
 
 function requestTackle(){
   state.myInput.tackle = true;
-  // brief flash
   navigator.vibrate && navigator.vibrate(20);
+  playSfx('tackle');
 }
 
 function initMatchState(){
@@ -372,13 +480,13 @@ function startCountdownThenRun(){
   state.game.paused = true;
   state.game.roundEnded = false;
   showRoundBannerWithSub(`第${state.round}番`, '構えて…', '');
-  // start the loop so we render
   if(!state.rafId){
     state.lastTime = performance.now();
     loop();
   }
   setTimeout(() => {
     showRoundBannerWithSub('はっけよい', '残った！', '');
+    playSfx('bell');
     setTimeout(() => {
       hideBanner();
       state.game.paused = false;
@@ -455,9 +563,8 @@ function loop(){
     // consume tackle press
     state.myInput.tackle = false;
     state.opInput.tackle = false;
+    updateFx(dt);
   } else if (state.mode === 'guest'){
-    // World is rendered rotated 180° for guest, so we invert tilt before sending
-    // (guest's "right" should push p2 left in world coords; "down" -> "up").
     state.myInput.seq = (state.myInput.seq+1)|0;
     safeSend({ t:'in', i: {
       tx: -state.myInput.tx,
@@ -467,6 +574,7 @@ function loop(){
     }});
     state.myInput.tackle = false;
     interpFromSnapshot();
+    updateFx(dt);
   }
 
   render();
@@ -571,15 +679,12 @@ function resolveCollision(a,b){
   if(d <= 0.001 || d >= minD) return;
   const nx = dx/d, ny = dy/d;
   const overlap = (minD-d);
-  // Separate
   a.x -= nx*overlap*0.5; a.y -= ny*overlap*0.5;
   b.x += nx*overlap*0.5; b.y += ny*overlap*0.5;
-  // Relative vel along normal
   const rvx = b.vx-a.vx, rvy = b.vy-a.vy;
   const vn = rvx*nx + rvy*ny;
-  if(vn > 0) return; // separating
+  if(vn > 0) return;
   const e = PLAYER.restitution;
-  // tackle bonus
   const bonusA = (a.tackleT>0)?1.6:1.0;
   const bonusB = (b.tackleT>0)?1.6:1.0;
   const j = -(1+e)*vn / 2;
@@ -587,12 +692,50 @@ function resolveCollision(a,b){
   a.vx -= ja*nx; a.vy -= ja*ny;
   b.vx += jb*nx; b.vy += jb*ny;
 
-  // Add some shove if either is tackling
   if(a.tackleT>0){ b.vx += nx*180; b.vy += ny*180; }
   if(b.tackleT>0){ a.vx -= nx*180; a.vy -= ny*180; }
 
-  // Haptic
-  navigator.vibrate && navigator.vibrate(15);
+  // Haptic + sfx (impact strength gates)
+  const strength = Math.abs(vn);
+  if(strength > 60){
+    navigator.vibrate && navigator.vibrate(15);
+    playSfx('hit');
+    spawnImpactFx((a.x+b.x)/2, (a.y+b.y)/2);
+  }
+}
+
+// ---------- FX particles ----------
+const fxParticles = [];
+function spawnImpactFx(x,y){
+  for(let i=0;i<10;i++){
+    const a = Math.random()*Math.PI*2;
+    const sp = 60 + Math.random()*180;
+    fxParticles.push({
+      x, y,
+      vx: Math.cos(a)*sp, vy: Math.sin(a)*sp,
+      life: 0.4 + Math.random()*0.3,
+      max: 0.6,
+      size: 4 + Math.random()*4,
+    });
+  }
+}
+function updateFx(dt){
+  for(let i=fxParticles.length-1;i>=0;i--){
+    const p = fxParticles[i];
+    p.life -= dt;
+    if(p.life <= 0){ fxParticles.splice(i,1); continue; }
+    p.x += p.vx*dt; p.y += p.vy*dt;
+    p.vx *= 0.92; p.vy *= 0.92;
+  }
+}
+function drawFx(){
+  for(const p of fxParticles){
+    const a = Math.max(0, p.life / p.max);
+    ctx.fillStyle = `rgba(245,230,196,${a})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size*a, 0, Math.PI*2);
+    ctx.fill();
+  }
 }
 
 function dist(x1,y1,x2,y2){ const dx=x2-x1, dy=y2-y1; return Math.hypot(dx,dy); }
@@ -713,6 +856,7 @@ function render(){
   drawShadow(me); drawShadow(op);
   drawRikishi(op, op === state.game.p1 ? '#a8322c' : '#2f4a6b', false);
   drawRikishi(me, me === state.game.p1 ? '#a8322c' : '#2f4a6b', true);
+  drawFx();
 
   ctx.restore();
 
@@ -862,13 +1006,12 @@ function drawCountdown(w,h){
 // ---------- Result ----------
 function showResult(win){
   state.matchOver = true;
-  // stop loop
-  // (we keep loop running for animation but game stays paused)
   state.game.paused = true;
   $('result-title').textContent = win ? '勝利！' : '敗北…';
   $('result-sub').textContent = `${state.scoreMe} － ${state.scoreOp}`;
+  playSfx(win ? 'win' : 'lose');
   hideBanner();
-  setTimeout(()=> showScreen('result'), 200);
+  setTimeout(()=> showScreen('result'), 300);
 }
 
 // ---------- Rematch / back ----------
@@ -917,7 +1060,7 @@ $('btn-match').onclick = async () => {
     setStatus('合言葉は2文字以上で', true);
     return;
   }
-  // Pre-request motion permission on user gesture
+  ensureAudio();
   try { await ensureMotionPermission(); } catch(e){}
   await startMatchmaking(phrase);
 };
@@ -925,6 +1068,7 @@ $('btn-match').onclick = async () => {
 $('btn-solo').onclick = async () => {
   state.mode = 'cpu';
   state.scoreMe = 0; state.scoreOp = 0; state.round=1;
+  ensureAudio();
   try { await ensureMotionPermission(); } catch(e){}
   enterGame();
 };
