@@ -1,9 +1,10 @@
 /* =========================================================
-   土俵バトル - 1vs1 ジャイロ相撲 (大幅リニューアル版)
+   土俵バトル - 1vs1 ジャイロ相撲 (大幅リニューアル版 v2)
    - PeerJS で合言葉マッチング (host/guest 決定はID辞書順)
    - WebRTC DataChannel で 入力同期 (authoritative host)
    - ジャイロ操作 + 複数アクションボタン
    - スペシャルアクション、コンボシステム、画面エフェクト
+   - 強化版: キャラクターデザイン、高度なエフェクト、ジャイロ感度改善
    ========================================================= */
 
 (() => {
@@ -59,6 +60,15 @@ const ROUND = {
   startCountdown: 3,
 };
 
+// ジャイロ感度改善用定数
+const GYRO = {
+  deadZone: 3,
+  fullZone: 25,
+  maxTilt: 1.0,
+  smoothing: 0.85,
+  accelerationFactor: 1.2,
+};
+
 // ---------- State ----------
 const state = {
   mode: null,
@@ -91,6 +101,11 @@ const state = {
   screenShakeTime: 0,
   comboCount: 0,
   comboResetTimer: 0,
+  // 新規: 高度なエフェクト管理
+  impactFlash: 0,
+  impactFlashMax: 0.15,
+  shockwaves: [],
+  trailParticles: [],
 };
 
 // ---------- PeerJS matchmaking ----------
@@ -264,10 +279,25 @@ function attachOrientation(){
     }
     const dg = g - state.motionCalibration.gamma;
     const db = b - state.motionCalibration.beta;
-    const tx = clamp(softZone(dg, 3, 25), -1, 1);
-    const ty = clamp(softZone(db, 3, 25), -1, 1);
-    state.motionTilt.x = tx;
-    state.motionTilt.y = ty;
+    
+    // 改善版: より精密なジャイロ処理
+    let tx = softZone(dg, GYRO.deadZone, GYRO.fullZone);
+    let ty = softZone(db, GYRO.deadZone, GYRO.fullZone);
+    
+    // 加速度による感度調整
+    const tiltMagnitude = Math.hypot(tx, ty);
+    if(tiltMagnitude > 0.3){
+      const factor = 1 + (tiltMagnitude - 0.3) * GYRO.accelerationFactor * 0.5;
+      tx *= factor;
+      ty *= factor;
+    }
+    
+    tx = clamp(tx, -GYRO.maxTilt, GYRO.maxTilt);
+    ty = clamp(ty, -GYRO.maxTilt, GYRO.maxTilt);
+    
+    // スムージング
+    state.motionTilt.x = state.motionTilt.x * GYRO.smoothing + tx * (1 - GYRO.smoothing);
+    state.motionTilt.y = state.motionTilt.y * GYRO.smoothing + ty * (1 - GYRO.smoothing);
   }, true);
 }
 
@@ -298,13 +328,11 @@ function playSfx(kind){
     g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.25, t0+0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.22);
     o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.25);
   } else if(kind === 'spin'){
-    // スピンアタック音
     const o = audioCtx.createOscillator(), g = audioCtx.createGain();
     o.type='sine'; o.frequency.setValueAtTime(440, t0); o.frequency.exponentialRampToValueAtTime(220, t0+0.3);
     g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.3, t0+0.05); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.35);
     o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.4);
   } else if(kind === 'defend'){
-    // 防御音
     const o = audioCtx.createOscillator(), g = audioCtx.createGain();
     o.type='triangle'; o.frequency.setValueAtTime(330, t0); o.frequency.exponentialRampToValueAtTime(220, t0+0.2);
     g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.2, t0+0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.22);
@@ -318,189 +346,180 @@ function playSfx(kind){
     const d = buf.getChannelData(0); for(let i=0;i<d.length;i++) d[i] = (Math.random()*2-1) * (1 - i/d.length);
     const n = audioCtx.createBufferSource(), ng = audioCtx.createGain();
     n.buffer = buf; ng.gain.value = 0.18;
-    n.connect(ng).connect(audioCtx.destination); n.start(t0);
-  } else if(kind === 'win'){
-    [523, 659, 784].forEach((f, i) => {
-      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-      const s = t0 + i*0.12;
-      o.type='triangle'; o.frequency.value = f;
-      g.gain.setValueAtTime(0.0001, s); g.gain.exponentialRampToValueAtTime(0.2, s+0.02); g.gain.exponentialRampToValueAtTime(0.0001, s+0.35);
-      o.connect(g).connect(audioCtx.destination); o.start(s); o.stop(s+0.4);
-    });
-  } else if(kind === 'lose'){
-    [330, 262, 220].forEach((f, i) => {
-      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-      const s = t0 + i*0.14;
-      o.type='sine'; o.frequency.value = f;
-      g.gain.setValueAtTime(0.0001, s); g.gain.exponentialRampToValueAtTime(0.18, s+0.02); g.gain.exponentialRampToValueAtTime(0.0001, s+0.45);
-      o.connect(g).connect(audioCtx.destination); o.start(s); o.stop(s+0.5);
-    });
+    n.connect(ng).connect(audioCtx.destination); n.start(t0); n.stop(t0+0.08);
+  } else if(kind === 'combo'){
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type='sine'; o.frequency.setValueAtTime(880, t0); o.frequency.exponentialRampToValueAtTime(440, t0+0.15);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.2, t0+0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.18);
+    o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.2);
   } else if(kind === 'bell'){
     const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-    o.type='sine'; o.frequency.setValueAtTime(880, t0); o.frequency.exponentialRampToValueAtTime(660, t0+0.6);
-    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.22, t0+0.01); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.7);
-    o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.75);
-  } else if(kind === 'combo'){
-    // コンボ音
-    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-    o.type='sine'; o.frequency.setValueAtTime(600, t0); o.frequency.exponentialRampToValueAtTime(800, t0+0.1);
-    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.15, t0+0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.12);
-    o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.15);
+    o.type='sine'; o.frequency.setValueAtTime(523, t0); o.frequency.exponentialRampToValueAtTime(330, t0+0.5);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.3, t0+0.05); g.gain.exponentialRampToValueAtTime(0.0001, t0+0.55);
+    o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0+0.6);
   }
 }
 
-// Touch fallback
-function attachTouchFallback(canvas){
-  let dragging = false, cx=0, cy=0;
-  const start = (x,y)=>{ dragging=true; cx=x; cy=y; };
-  const move = (x,y)=>{
-    if(!dragging) return;
-    const dx = (x-cx) / 80;
-    const dy = (y-cy) / 80;
-    state.motionTilt.x = clamp(dx, -1, 1);
-    state.motionTilt.y = clamp(dy, -1, 1);
-  };
-  const end = ()=>{ dragging=false; state.motionTilt.x=0; state.motionTilt.y=0; };
-  canvas.addEventListener('touchstart', e => { const t=e.touches[0]; start(t.clientX,t.clientY); }, {passive:true});
-  canvas.addEventListener('touchmove',  e => { const t=e.touches[0]; move(t.clientX,t.clientY); }, {passive:true});
-  canvas.addEventListener('touchend',   end);
-  canvas.addEventListener('mousedown',  e => start(e.clientX,e.clientY));
-  canvas.addEventListener('mousemove',  e => move(e.clientX,e.clientY));
-  window.addEventListener('mouseup',    end);
-
-  const keys = {};
-  window.addEventListener('keydown', e => { keys[e.key]=true; updateKeys(); });
-  window.addEventListener('keyup',   e => { keys[e.key]=false; updateKeys(); 
-    if(e.key===' '){ requestTackle(); }
-    if(e.key==='q'){ requestSpin(); }
-    if(e.key==='e'){ requestDefend(); }
-  });
-  function updateKeys(){
-    let x=0,y=0;
-    if(keys['ArrowLeft']||keys['a']) x-=1;
-    if(keys['ArrowRight']||keys['d']) x+=1;
-    if(keys['ArrowUp']||keys['w']) y-=1;
-    if(keys['ArrowDown']||keys['s']) y+=1;
-    if(x||y){ state.motionTilt.x=x; state.motionTilt.y=y; }
-    else if(!dragging){ state.motionTilt.x=0; state.motionTilt.y=0; }
-  }
-}
-
-// ---------- Game flow ----------
-let _gameInited = false;
-function enterGame(){
-  showScreen('game');
-  if(!_gameInited){
-    setupCanvas();
-    setupActionButtons();
-    _gameInited = true;
-  }
-  setupMotion();
-  initMatchState();
-  if(state.rafId){ cancelAnimationFrame(state.rafId); state.rafId = null; }
-  startCountdownThenRun();
-}
-
-function setupMotion(){
-  if (typeof DeviceOrientationEvent !== 'undefined' &&
-      typeof DeviceOrientationEvent.requestPermission === 'function' &&
-      !state.myMotionEnabled){
-    const prompt = $('enable-motion');
-    prompt.classList.remove('hidden');
-    $('btn-enable-motion').onclick = async () => {
-      const ok = await ensureMotionPermission();
-      prompt.classList.add('hidden');
-      if(!ok) {
-      }
-    };
-  } else {
-    attachOrientation();
-    state.myMotionEnabled = true;
-  }
-}
-
-function setupActionButtons(){
+// ---------- UI Controls ----------
+function attachUI(){
+  const passInput = $('passphrase');
+  const btnMatch = $('btn-match');
+  const btnSolo = $('btn-solo');
+  const btnEnableMotion = $('btn-enable-motion');
   const btnTackle = $('btn-tackle');
   const btnSpin = $('btn-spin');
   const btnDefend = $('btn-defend');
+  const btnRematch = $('btn-rematch');
+  const btnBack = $('btn-back');
 
-  const fire = (action, e) => {
-    if(e) e.preventDefault();
-    if(action === 'tackle') requestTackle();
-    else if(action === 'spin') requestSpin();
-    else if(action === 'defend') requestDefend();
-  };
+  if(btnMatch) btnMatch.addEventListener('click', () => {
+    const phrase = passInput.value.trim();
+    if(phrase.length < 2) { setStatus('合言葉は2文字以上で入力してください', true); return; }
+    ensureAudio();
+    startMatchmaking(phrase);
+  });
 
-  if(btnTackle){
-    btnTackle.ontouchstart = (e) => fire('tackle', e);
-    btnTackle.onmousedown = (e) => fire('tackle', e);
-  }
-  if(btnSpin){
-    btnSpin.ontouchstart = (e) => fire('spin', e);
-    btnSpin.onmousedown = (e) => fire('spin', e);
-  }
-  if(btnDefend){
-    btnDefend.ontouchstart = (e) => fire('defend', e);
-    btnDefend.onmousedown = (e) => fire('defend', e);
-  }
+  if(btnSolo) btnSolo.addEventListener('click', () => {
+    ensureAudio();
+    state.mode = 'cpu';
+    state.cpuDifficulty = 'normal';
+    state.scoreMe = 0; state.scoreOp = 0; state.round = 1; state.matchOver = false;
+    enterGame();
+  });
 
-  // Long-press tackle button to recalibrate
-  let pressTimer = null;
-  const startPress = () => {
-    pressTimer = setTimeout(() => {
-      state.hasReceivedMotion = false;
-      navigator.vibrate && navigator.vibrate([20,40,20]);
-      flashMsg('構え直し（ジャイロ再調整）');
-    }, 700);
-  };
-  const cancelPress = () => { if(pressTimer){ clearTimeout(pressTimer); pressTimer=null; } };
-  if(btnTackle){
-    btnTackle.addEventListener('touchstart', startPress, {passive:true});
-    btnTackle.addEventListener('touchend', cancelPress);
-    btnTackle.addEventListener('touchcancel', cancelPress);
-    btnTackle.addEventListener('mousedown', startPress);
-    btnTackle.addEventListener('mouseup', cancelPress);
-    btnTackle.addEventListener('mouseleave', cancelPress);
-  }
+  if(btnEnableMotion) btnEnableMotion.addEventListener('click', async () => {
+    const ok = await ensureMotionPermission();
+    if(ok){
+      $('enable-motion').classList.add('hidden');
+    } else {
+      setStatus('動きセンサーの許可に失敗しました', true);
+    }
+  });
+
+  if(btnTackle) btnTackle.addEventListener('click', () => {
+    state.myInput.tackle = true;
+    ensureAudio();
+    playSfx('tackle');
+  });
+
+  if(btnSpin) btnSpin.addEventListener('click', () => {
+    state.myInput.spin = true;
+    ensureAudio();
+    playSfx('spin');
+  });
+
+  if(btnDefend) btnDefend.addEventListener('click', () => {
+    state.myInput.defend = true;
+    ensureAudio();
+    playSfx('defend');
+  });
+
+  if(btnRematch) btnRematch.addEventListener('click', () => {
+    if(state.mode === 'host'){
+      startNewMatch();
+    } else if(state.mode === 'guest'){
+      safeSend({ t:'rematch' });
+    }
+  });
+
+  if(btnBack) btnBack.addEventListener('click', () => {
+    location.reload();
+  });
+
+  // Keyboard fallback
+  document.addEventListener('keydown', (e) => {
+    if(!state.game || state.game.paused) return;
+    if(e.key === ' ') { e.preventDefault(); state.myInput.tackle = true; playSfx('tackle'); }
+    else if(e.key === 'q' || e.key === 'Q') { e.preventDefault(); state.myInput.spin = true; playSfx('spin'); }
+    else if(e.key === 'e' || e.key === 'E') { e.preventDefault(); state.myInput.defend = true; playSfx('defend'); }
+    else if(e.key === 'ArrowLeft') { e.preventDefault(); state.myInput.tx = -1; }
+    else if(e.key === 'ArrowRight') { e.preventDefault(); state.myInput.tx = 1; }
+    else if(e.key === 'ArrowUp') { e.preventDefault(); state.myInput.ty = -1; }
+    else if(e.key === 'ArrowDown') { e.preventDefault(); state.myInput.ty = 1; }
+  });
 }
 
-function flashMsg(text){
-  let el = document.getElementById('flash-msg');
-  if(!el){
-    el = document.createElement('div');
-    el.id = 'flash-msg';
-    el.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);background:rgba(40,28,16,.85);color:#fbf2d9;padding:8px 18px;border-radius:18px;z-index:30;font-size:14px;letter-spacing:.1em;pointer-events:none;transition:opacity .3s;';
-    document.body.appendChild(el);
-  }
-  el.textContent = text;
-  el.style.opacity = '1';
-  clearTimeout(flashMsg._t);
-  flashMsg._t = setTimeout(()=> { el.style.opacity='0'; }, 1400);
+function attachTouchFallback(canvas){
+  let touchX = 0, touchY = 0;
+  canvas.addEventListener('touchstart', (e) => {
+    if(e.touches.length > 0){
+      touchX = e.touches[0].clientX;
+      touchY = e.touches[0].clientY;
+    }
+  });
+  canvas.addEventListener('touchmove', (e) => {
+    if(e.touches.length > 0){
+      const x = e.touches[0].clientX;
+      const y = e.touches[0].clientY;
+      const dx = x - touchX;
+      const dy = y - touchY;
+      const mag = Math.hypot(dx, dy);
+      if(mag > 5){
+        state.myInput.tx = clamp(dx / 100, -1, 1);
+        state.myInput.ty = clamp(dy / 100, -1, 1);
+      }
+    }
+  });
 }
 
-function requestTackle(){
-  state.myInput.tackle = true;
-  navigator.vibrate && navigator.vibrate(20);
-  playSfx('tackle');
-}
-
-function requestSpin(){
-  state.myInput.spin = true;
-  navigator.vibrate && navigator.vibrate([15, 10, 15]);
-  playSfx('spin');
-}
-
-function requestDefend(){
-  state.myInput.defend = true;
-  navigator.vibrate && navigator.vibrate(15);
-  playSfx('defend');
-}
-
-function initMatchState(){
+function enterGame(){
+  showScreen('game');
   state.game = createInitialGameState();
-  state.matchOver = false;
+  startCountdownThenRun();
+  if(!state.myMotionEnabled && state.mode !== 'cpu'){
+    $('enable-motion').classList.remove('hidden');
+  }
+}
+
+function startNewMatch(){
+  state.scoreMe = 0; state.scoreOp = 0; state.round = 1; state.matchOver = false;
+  state.game = createInitialGameState();
+  startCountdownThenRun();
+}
+
+function endMatchAbort(){
+  if(state.rafId) cancelAnimationFrame(state.rafId);
+  state.rafId = null;
+  showScreen('lobby');
+}
+
+function cpuThink(dt){
+  const me = state.game.p1;
+  const op = state.game.p2;
+  const dx = op.x - me.x;
+  const dy = op.y - me.y;
+  const dist = Math.hypot(dx, dy);
+  const mag = dist > 0.1 ? 1 : 0;
+  
+  state.opInput.tx = (mag > 0) ? dx / dist * 0.7 : 0;
+  state.opInput.ty = (mag > 0) ? dy / dist * 0.7 : 0;
+  
+  const difficulty = state.cpuDifficulty;
+  const rand = Math.random();
+  
+  if(difficulty === 'easy'){
+    if(dist < 200 && rand < 0.15) state.opInput.tackle = true;
+    if(dist < 150 && rand < 0.08) state.opInput.spin = true;
+    if(dist < 100 && rand < 0.1) state.opInput.defend = true;
+  } else if(difficulty === 'normal'){
+    if(dist < 250 && rand < 0.25) state.opInput.tackle = true;
+    if(dist < 180 && rand < 0.15) state.opInput.spin = true;
+    if(dist < 120 && rand < 0.2) state.opInput.defend = true;
+  } else {
+    if(dist < 280 && rand < 0.35) state.opInput.tackle = true;
+    if(dist < 200 && rand < 0.25) state.opInput.spin = true;
+    if(dist < 150 && rand < 0.3) state.opInput.defend = true;
+  }
+}
+
+function resetGameState(){
+  state.screenShakeIntensity = 0;
+  state.screenShakeTime = 0;
   state.comboCount = 0;
   state.comboResetTimer = 0;
+  state.impactFlash = 0;
+  state.shockwaves = [];
+  state.trailParticles = [];
 }
 
 function createInitialGameState(){
@@ -650,6 +669,10 @@ function loop(){
     state.comboCount = 0;
   }
 
+  // Update impact flash
+  state.impactFlash -= dt;
+  if(state.impactFlash < 0) state.impactFlash = 0;
+
   render();
 }
 
@@ -785,18 +808,14 @@ function resolveCollision(a,b){
 
   // Defense damage reduction
   let damageMultiplier = 1.0;
-  if(a.isDefending) damageMultiplier *= 0.6;
-  if(b.isDefending) damageMultiplier *= 0.6;
+  if(a.isDefending) damageMultiplier *= 0.5;
+  if(b.isDefending) damageMultiplier *= 0.5;
 
-  const e = PLAYER.restitution;
-  const bonusA = (a.tackleT>0 || a.spinT>0)?1.6:1.0;
-  const bonusB = (b.tackleT>0 || b.spinT>0)?1.6:1.0;
-  const j = -(1+e)*vn / 2;
-  const ja = j*bonusA*damageMultiplier, jb = j*bonusB*damageMultiplier;
-  a.vx -= ja*nx; a.vy -= ja*ny;
-  b.vx += jb*nx; b.vy += jb*ny;
-  if(a.tackleT>0){ b.vx += nx*240; b.vy += ny*240; }
-  if(b.tackleT>0){ a.vx -= nx*240; a.vy -= ny*240; }
+  a.vx -= nx*vn*PLAYER.restitution*damageMultiplier;
+  a.vy -= ny*vn*PLAYER.restitution*damageMultiplier;
+  b.vx += nx*vn*PLAYER.restitution*damageMultiplier;
+  b.vy += ny*vn*PLAYER.restitution*damageMultiplier;
+
   if(a.spinT>0){ b.vx += nx*280; b.vy += ny*280; }
   if(b.spinT>0){ a.vx -= nx*280; a.vy -= ny*280; }
 
@@ -805,8 +824,10 @@ function resolveCollision(a,b){
     navigator.vibrate && navigator.vibrate(20);
     playSfx('hit');
     spawnImpactFx((a.x+b.x)/2, (a.y+b.y)/2);
+    spawnShockwave((a.x+b.x)/2, (a.y+b.y)/2, strength);
     state.screenShakeIntensity = Math.min(8, strength/100);
-    state.screenShakeTime = 0.1;
+    state.screenShakeTime = 0.15;
+    state.impactFlash = state.impactFlashMax;
     state.comboCount++;
     state.comboResetTimer = 1.0;
     if(state.comboCount > 1){
@@ -820,18 +841,45 @@ function resolveCollision(a,b){
 // ---------- FX particles ----------
 const fxParticles = [];
 function spawnImpactFx(x,y){
-  for(let i=0;i<16;i++){
+  for(let i=0;i<24;i++){
     const a = Math.random()*Math.PI*2;
-    const sp = 80 + Math.random()*220;
+    const sp = 100 + Math.random()*280;
     fxParticles.push({
       x, y,
       vx: Math.cos(a)*sp, vy: Math.sin(a)*sp,
-      life: 0.4 + Math.random()*0.3,
-      max: 0.6,
-      size: 5 + Math.random()*5,
+      life: 0.5 + Math.random()*0.4,
+      max: 0.8,
+      size: 4 + Math.random()*7,
+      color: Math.random() > 0.5 ? 'rgba(255,200,100,{a})' : 'rgba(255,220,150,{a})',
     });
   }
 }
+
+function spawnShockwave(x, y, strength){
+  state.shockwaves.push({
+    x, y,
+    radius: 0,
+    maxRadius: 80 + strength * 0.3,
+    life: 0.3,
+    max: 0.3,
+  });
+}
+
+function spawnTrailParticles(x, y, vx, vy){
+  for(let i=0;i<3;i++){
+    const angle = Math.atan2(vy, vx) + (Math.random() - 0.5) * 0.5;
+    const speed = Math.hypot(vx, vy) * 0.5;
+    state.trailParticles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 0.2 + Math.random() * 0.1,
+      max: 0.3,
+      size: 3 + Math.random() * 3,
+    });
+  }
+}
+
 function updateFx(dt){
   for(let i=fxParticles.length-1;i>=0;i--){
     const p = fxParticles[i];
@@ -840,16 +888,53 @@ function updateFx(dt){
     p.x += p.vx*dt; p.y += p.vy*dt;
     p.vx *= 0.92; p.vy *= 0.92;
   }
+
+  for(let i=state.shockwaves.length-1;i>=0;i--){
+    const s = state.shockwaves[i];
+    s.life -= dt;
+    if(s.life <= 0){ state.shockwaves.splice(i,1); continue; }
+    s.radius = s.maxRadius * (1 - s.life / s.max);
+  }
+
+  for(let i=state.trailParticles.length-1;i>=0;i--){
+    const p = state.trailParticles[i];
+    p.life -= dt;
+    if(p.life <= 0){ state.trailParticles.splice(i,1); continue; }
+    p.x += p.vx*dt; p.y += p.vy*dt;
+    p.vx *= 0.88; p.vy *= 0.88;
+  }
 }
+
 function drawFx(){
+  // Draw shockwaves
+  for(const s of state.shockwaves){
+    const a = Math.max(0, s.life / s.max);
+    ctx.strokeStyle = `rgba(255,200,100,${a * 0.6})`;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.radius, 0, Math.PI*2);
+    ctx.stroke();
+  }
+
+  // Draw impact particles
   for(const p of fxParticles){
     const a = Math.max(0, p.life / p.max);
-    ctx.fillStyle = `rgba(245,230,196,${a})`;
+    ctx.fillStyle = p.color.replace('{a}', a);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size*a, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Draw trail particles
+  for(const p of state.trailParticles){
+    const a = Math.max(0, p.life / p.max);
+    ctx.fillStyle = `rgba(200,220,255,${a * 0.5})`;
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.size*a, 0, Math.PI*2);
     ctx.fill();
   }
 }
+
 function dist(x1,y1,x2,y2){ const dx=x2-x1, dy=y2-y1; return Math.hypot(dx,dy); }
 
 // ---------- Round end ----------
@@ -877,6 +962,7 @@ function onRoundEnd(winner){
     setTimeout(()=> {
       state.round++;
       state.game = createInitialGameState();
+      resetGameState();
       startCountdownThenRun();
     }, 1700);
   }
@@ -944,6 +1030,13 @@ function render(){
     ctx.translate(shakeX, shakeY);
   }
 
+  // Impact flash effect
+  if(state.impactFlash > 0){
+    const flashAlpha = (state.impactFlash / state.impactFlashMax) * 0.3;
+    ctx.fillStyle = `rgba(255,255,255,${flashAlpha})`;
+    ctx.fillRect(0, 0, w, h);
+  }
+
   ctx.translate(offsetX, offsetY);
   ctx.scale(scale, scale);
 
@@ -990,14 +1083,21 @@ function render(){
     btnDefend.classList.toggle('cooldown', myStamina < PLAYER.defenseStaminaCost || me.defendCooldown>0);
   }
 
-  // Combo display
+  // Combo display - enhanced
   if(state.comboCount > 1){
     ctx.save();
     ctx.translate(offsetX + window.innerWidth/2, offsetY + 120);
     ctx.scale(1/scale, 1/scale);
-    ctx.fillStyle = 'rgba(255,200,0,0.8)';
-    ctx.font = 'bold 48px sans-serif';
+    const comboScale = 1 + Math.sin(performance.now() / 150) * 0.1;
+    ctx.scale(comboScale, comboScale);
+    ctx.fillStyle = 'rgba(255,200,0,0.9)';
+    ctx.font = 'bold 60px sans-serif';
     ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0,0,0,0.5)';
+    ctx.shadowBlur = 10;
+    ctx.shadowOffsetX = 2;
+    ctx.shadowOffsetY = 2;
     ctx.fillText(`COMBO x${state.comboCount}`, 0, 0);
     ctx.restore();
   }
@@ -1009,126 +1109,195 @@ function render(){
 
 function drawDohyo(){
   const cx = ARENA.size/2, cy = ARENA.size/2;
+  
+  // 土俵の背景
   ctx.fillStyle = '#cdb070';
   ctx.fillRect(40,40,ARENA.size-80, ARENA.size-80);
+  
+  // 土俵の枠
   ctx.strokeStyle = '#6b4a22';
   ctx.lineWidth = 6;
   ctx.strokeRect(40,40,ARENA.size-80, ARENA.size-80);
 
+  // 円形の土俵
   const grad = ctx.createRadialGradient(cx,cy-60,80, cx,cy, ARENA.ringRadius);
   grad.addColorStop(0, '#e3b67a');
+  grad.addColorStop(0.5, '#d4a968');
   grad.addColorStop(1, '#a76f3a');
   ctx.fillStyle = grad;
   ctx.beginPath();
   ctx.arc(cx,cy, ARENA.ringRadius, 0, Math.PI*2);
   ctx.fill();
 
+  // 土俵の外枠（白）
   ctx.lineWidth = 18;
   ctx.strokeStyle = '#f1e1bc';
   ctx.beginPath();
   ctx.arc(cx,cy, ARENA.ringRadius-10, 0, Math.PI*2);
   ctx.stroke();
+  
+  // 土俵の外枠（黒）
   ctx.lineWidth = 2;
   ctx.strokeStyle = '#7a5a30';
   ctx.beginPath();
   ctx.arc(cx,cy, ARENA.ringRadius-10, 0, Math.PI*2);
   ctx.stroke();
 
+  // 中央ラインと装飾
   ctx.fillStyle = '#fff';
   ctx.fillRect(cx-50, cy-2, 100, 4);
   ctx.fillRect(cx-50, cy-50, 100, 4);
   ctx.fillRect(cx-50, cy+46, 100, 4);
+  
+  // 土俵の質感を追加
+  ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+  ctx.lineWidth = 1;
+  for(let i=0;i<8;i++){
+    const angle = (i / 8) * Math.PI * 2;
+    const x1 = cx + Math.cos(angle) * (ARENA.ringRadius - 20);
+    const y1 = cy + Math.sin(angle) * (ARENA.ringRadius - 20);
+    const x2 = cx + Math.cos(angle) * ARENA.ringRadius;
+    const y2 = cy + Math.sin(angle) * ARENA.ringRadius;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
 }
 
 function drawShadow(p){
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
   ctx.beginPath();
-  ctx.ellipse(p.x+6, p.y+12, PLAYER.radius*0.95, PLAYER.radius*0.45, 0, 0, Math.PI*2);
+  ctx.ellipse(p.x+6, p.y+14, PLAYER.radius*0.95, PLAYER.radius*0.4, 0, 0, Math.PI*2);
   ctx.fill();
 }
 
 function drawRikishi(p, color, isMe){
   const r = PLAYER.radius;
-  const grad = ctx.createRadialGradient(p.x-r*0.4, p.y-r*0.4, r*0.2, p.x, p.y, r);
-  grad.addColorStop(0, lighten(color, 0.2));
+  
+  // 体のグラデーション
+  const grad = ctx.createRadialGradient(p.x-r*0.3, p.y-r*0.3, r*0.1, p.x, p.y, r);
+  grad.addColorStop(0, lighten(color, 0.25));
+  grad.addColorStop(0.6, lighten(color, 0.1));
   grad.addColorStop(1, color);
   ctx.fillStyle = grad;
   ctx.beginPath();
   ctx.arc(p.x, p.y, r, 0, Math.PI*2);
   ctx.fill();
 
-  // mawashi
+  // mawashi（褌）
   ctx.fillStyle = isMe ? '#f5e6c4' : '#dcd0b0';
   ctx.beginPath();
   ctx.arc(p.x, p.y+6, r*0.7, 0, Math.PI, false);
   ctx.fill();
+  
+  // mawashi の装飾
+  ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y+6, r*0.7, 0, Math.PI, false);
+  ctx.stroke();
 
-  // outline
-  ctx.lineWidth = 4;
+  // 体の輪郭
+  ctx.lineWidth = 5;
   ctx.strokeStyle = '#2b2118';
   ctx.beginPath();
   ctx.arc(p.x, p.y, r, 0, Math.PI*2);
   ctx.stroke();
 
-  // tackle aura
+  // tackle aura - 強化版
   if(p.tackleT>0){
-    ctx.strokeStyle = 'rgba(255,240,180,0.7)';
-    ctx.lineWidth = 5;
+    const tackleAlpha = p.tackleT / PLAYER.tackleDuration;
+    ctx.strokeStyle = `rgba(255,240,180,${0.8 * tackleAlpha})`;
+    ctx.lineWidth = 6;
     ctx.beginPath();
-    ctx.arc(p.x,p.y, r+8, 0, Math.PI*2);
+    ctx.arc(p.x,p.y, r+10, 0, Math.PI*2);
     ctx.stroke();
-    const dir = Math.atan2(p.vy, p.vx);
-    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    
+    ctx.strokeStyle = `rgba(255,255,200,${0.6 * tackleAlpha})`;
     ctx.lineWidth = 3;
-    for(let i=0;i<4;i++){
-      const a = dir + (i-1.5)*0.15;
+    ctx.beginPath();
+    ctx.arc(p.x,p.y, r+18, 0, Math.PI*2);
+    ctx.stroke();
+    
+    const dir = Math.atan2(p.vy, p.vx);
+    ctx.strokeStyle = `rgba(255,255,255,${0.8 * tackleAlpha})`;
+    ctx.lineWidth = 4;
+    for(let i=0;i<6;i++){
+      const a = dir + (i-2.5)*0.12;
       const x1 = p.x - Math.cos(a)*r;
       const y1 = p.y - Math.sin(a)*r;
-      const x2 = x1 - Math.cos(a)*30;
-      const y2 = y1 - Math.sin(a)*30;
+      const x2 = x1 - Math.cos(a)*40;
+      const y2 = y1 - Math.sin(a)*40;
       ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
     }
   }
 
-  // spin aura
+  // spin aura - 強化版
   if(p.spinT>0){
-    ctx.strokeStyle = 'rgba(200,255,100,0.6)';
-    ctx.lineWidth = 6;
-    const rotation = (performance.now() / 200) % (Math.PI*2);
+    const spinAlpha = p.spinT / PLAYER.spinDuration;
+    ctx.strokeStyle = `rgba(200,255,100,${0.7 * spinAlpha})`;
+    ctx.lineWidth = 7;
+    const rotation = (performance.now() / 150) % (Math.PI*2);
     ctx.beginPath();
-    ctx.arc(p.x, p.y, r+12, rotation, rotation + Math.PI*0.7);
+    ctx.arc(p.x, p.y, r+14, rotation, rotation + Math.PI*0.8);
+    ctx.stroke();
+    
+    ctx.strokeStyle = `rgba(150,255,50,${0.4 * spinAlpha})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r+22, rotation + Math.PI*0.3, rotation + Math.PI*1.1);
     ctx.stroke();
   }
 
-  // defense shield
+  // defense shield - 強化版
   if(p.isDefending){
-    ctx.strokeStyle = 'rgba(100,150,255,0.5)';
-    ctx.lineWidth = 8;
+    const defendAlpha = p.defendT / PLAYER.defenseDuration;
+    ctx.strokeStyle = `rgba(100,150,255,${0.6 * defendAlpha})`;
+    ctx.lineWidth = 10;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, r+16, 0, Math.PI*2);
+    ctx.arc(p.x, p.y, r+18, 0, Math.PI*2);
     ctx.stroke();
-    ctx.strokeStyle = 'rgba(100,150,255,0.3)';
-    ctx.lineWidth = 4;
+    
+    ctx.strokeStyle = `rgba(150,200,255,${0.4 * defendAlpha})`;
+    ctx.lineWidth = 5;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, r+20, 0, Math.PI*2);
+    ctx.arc(p.x, p.y, r+26, 0, Math.PI*2);
     ctx.stroke();
+    
+    // シールドの装飾
+    for(let i=0;i<8;i++){
+      const angle = (i / 8) * Math.PI * 2;
+      const x = p.x + Math.cos(angle) * (r + 22);
+      const y = p.y + Math.sin(angle) * (r + 22);
+      ctx.fillStyle = `rgba(100,150,255,${0.5 * defendAlpha})`;
+      ctx.beginPath();
+      ctx.arc(x, y, 4, 0, Math.PI*2);
+      ctx.fill();
+    }
   }
 
   // marker
   if(isMe){
     ctx.save();
     if(state.mode === 'guest'){
-      ctx.translate(p.x, p.y-r-12);
+      ctx.translate(p.x, p.y-r-14);
       ctx.rotate(Math.PI);
       ctx.fillStyle = '#fff';
-      ctx.font = 'bold 22px "Hiragino Mincho ProN", serif';
+      ctx.font = 'bold 24px "Hiragino Mincho ProN", serif';
       ctx.textAlign='center';
-      ctx.fillText('己', 0, 8);
+      ctx.textBaseline='middle';
+      ctx.shadowColor = 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = 3;
+      ctx.fillText('己', 0, 0);
     } else {
       ctx.fillStyle = '#fff';
-      ctx.font = 'bold 22px "Hiragino Mincho ProN", serif';
+      ctx.font = 'bold 24px "Hiragino Mincho ProN", serif';
       ctx.textAlign='center';
-      ctx.fillText('己', p.x, p.y-r-12);
+      ctx.textBaseline='middle';
+      ctx.shadowColor = 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = 3;
+      ctx.fillText('己', p.x, p.y-r-14);
     }
     ctx.restore();
   }
@@ -1151,118 +1320,15 @@ function showResult(win){
   state.matchOver = true;
   state.game.paused = true;
   $('result-title').textContent = win ? '勝利！' : '敗北…';
-  $('result-sub').textContent = `${state.scoreMe} － ${state.scoreOp}`;
-  playSfx(win ? 'win' : 'lose');
-  hideBanner();
-  setTimeout(()=> showScreen('result'), 300);
+  $('result-sub').textContent = win ? 'あなたの勝ちです！' : '相手の勝ちです…';
+  showScreen('result');
 }
 
-// ---------- Rematch / back ----------
-$('btn-rematch').onclick = () => {
-  if(state.mode === 'cpu'){
-    state.scoreMe=0; state.scoreOp=0; state.round=1;
-    enterGame();
-    return;
-  }
-  if(state.mode === 'guest'){
-    safeSend({ t:'rematch' });
-    setStatus && setStatus('再戦リクエストを送信…');
-  }
-  startNewMatch();
-};
-function startNewMatch(){
-  state.scoreMe=0; state.scoreOp=0; state.round=1;
-  enterGame();
-}
-$('btn-back').onclick = () => {
-  cleanupConn();
+// ---------- Init ----------
+document.addEventListener('DOMContentLoaded', () => {
+  setupCanvas();
+  attachUI();
   showScreen('lobby');
-  setStatus('');
-};
-function cleanupConn(){
-  try{ if(state.conn) state.conn.close(); }catch(e){}
-  try{ if(state.peer) state.peer.destroy(); }catch(e){}
-  state.conn = null; state.peer = null;
-  if(state.rafId){ cancelAnimationFrame(state.rafId); state.rafId=null; }
-}
-function endMatchAbort(){
-  if(state.rafId){ cancelAnimationFrame(state.rafId); state.rafId=null; }
-  showScreen('lobby');
-}
-
-// ---------- Lobby buttons ----------
-$('btn-match').onclick = async () => {
-  const phrase = $('passphrase').value.trim();
-  if(phrase.length < 2){
-    setStatus('合言葉は2文字以上で', true);
-    return;
-  }
-  ensureAudio();
-  try { await ensureMotionPermission(); } catch(e){}
-  await startMatchmaking(phrase);
-};
-
-$('btn-solo').onclick = async () => {
-  state.mode = 'cpu';
-  state.scoreMe = 0; state.scoreOp = 0; state.round=1;
-  state.cpuDifficulty = 'normal';
-  ensureAudio();
-  try { await ensureMotionPermission(); } catch(e){}
-  enterGame();
-};
-
-if (new URLSearchParams(location.search).get('autoSolo') === '1'){
-  setTimeout(() => $('btn-solo').click(), 300);
-}
-
-// ---------- CPU ----------
-function cpuThink(dt){
-  const g = state.game;
-  if(g.paused || g.roundEnded){ state.opInput = {tx:0,ty:0,tackle:false,spin:false,defend:false,seq:0}; return; }
-  const me = g.p2;
-  const target = g.p1;
-  const cx = ARENA.size/2, cy = ARENA.size/2;
-  const dx = target.x - me.x;
-  const dy = target.y - me.y;
-  const d = Math.hypot(dx,dy)||1;
-
-  let ix = dx/d, iy = dy/d;
-
-  const pdToCenter = Math.hypot(target.x-cx, target.y-cy);
-  if(pdToCenter > ARENA.ringRadius*0.6){
-    const ox = (target.x - cx)/Math.max(1,pdToCenter);
-    const oy = (target.y - cy)/Math.max(1,pdToCenter);
-    ix = (ix+ox)/2; iy = (iy+oy)/2;
-    const m = Math.hypot(ix,iy)||1;
-    ix/=m; iy/=m;
-  }
-  const myDtoC = Math.hypot(me.x-cx, me.y-cy);
-  if(myDtoC > ARENA.ringRadius*0.78){
-    ix = (cx-me.x)/Math.max(1,myDtoC);
-    iy = (cy-me.y)/Math.max(1,myDtoC);
-  }
-
-  ix += (Math.random()-0.5)*0.1;
-  iy += (Math.random()-0.5)*0.1;
-
-  state.opInput.tx = clamp(ix, -1, 1);
-  state.opInput.ty = clamp(iy, -1, 1);
-
-  state.opInput.tackle = false;
-  state.opInput.spin = false;
-  state.opInput.defend = false;
-
-  const difficulty = state.cpuDifficulty === 'hard' ? 0.08 : (state.cpuDifficulty === 'easy' ? 0.02 : 0.04);
-
-  if(d < PLAYER.radius*3 && me.stamina > 50 && me.cooldown<=0 && Math.random()<difficulty){
-    state.opInput.tackle = true;
-  }
-  if(d < PLAYER.radius*4 && me.stamina > 60 && me.spinCooldown<=0 && Math.random()<difficulty*0.6){
-    state.opInput.spin = true;
-  }
-  if(d < PLAYER.radius*2.5 && me.stamina > 40 && me.defendCooldown<=0 && target.tackleT>0 && Math.random()<difficulty*0.8){
-    state.opInput.defend = true;
-  }
-}
+});
 
 })();
